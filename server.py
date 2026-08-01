@@ -335,7 +335,7 @@ async def list_products(
             {"title": {"$regex": q, "$options": "i"}},
             {"sku": {"$regex": q, "$options": "i"}},
         ]
-    docs = await db.products.find(query, {"_id": 0}).sort("created_at", -1).to_list(500)
+    docs = await db.products.find(query, {"_id": 0}).sort("created_at", -1).to_list(5000)
     return [_product_public(d) for d in docs]
 
 
@@ -773,6 +773,53 @@ async def ml_import_listings(user_id: str = Depends(get_current_user_id)):
             imported += 1
 
     return {"ok": True, "imported": imported, "updated": updated, "total_fetched": len(listings)}
+
+
+@api.post("/products/{product_id}/ai-suggest")
+async def product_ai_suggest(product_id: str, user_id: str = Depends(get_current_user_id)):
+    """Botão 'Gerar com IA' na edição do anúncio: busca anúncios reais e
+    parecidos no catálogo público do Mercado Livre (por SKU/título/marca),
+    usa essas referências para a IA escrever uma descrição, e sugere um
+    preço médio a partir da faixa de preço encontrada."""
+    doc = await db.products.find_one({"id": product_id, "user_id": user_id})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Produto não encontrado")
+
+    sku = doc.get("sku", "")
+    title = doc.get("title", "")
+    brand = doc.get("brand", "")
+    category = doc.get("category", "")
+
+    suggestion = ml_utils.suggest_from_sku(sku or title, brand)
+
+    reference_note = ""
+    suggested_price = None
+    if suggestion.get("found"):
+        reference_note = (
+            f"Título de referência encontrado em anúncios reais e parecidos no Mercado Livre: "
+            f"\"{suggestion['suggested_title']}\"."
+        )
+        if suggestion.get("price_min") and suggestion.get("price_max"):
+            suggested_price = round((suggestion["price_min"] + suggestion["price_max"]) / 2, 2)
+
+    raw_description = doc.get("description") or ""
+    combined_context = (raw_description + " " + reference_note).strip()
+
+    ai_result = await generate_listing_content(
+        raw_title=title,
+        raw_description=combined_context or title,
+        brand=brand,
+        category=category,
+    )
+
+    return {
+        "found_reference": suggestion.get("found", False),
+        "reference_title": suggestion.get("suggested_title"),
+        "sample_count": suggestion.get("sample_count", 0),
+        "title": ai_result["title"],
+        "description": ai_result["description"],
+        "suggested_price": suggested_price,
+    }
 
 
 @api.get("/products/lookup-sku")
