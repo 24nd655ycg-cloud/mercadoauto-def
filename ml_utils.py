@@ -106,6 +106,31 @@ def publish_item(access_token: str, item: dict) -> dict:
     return resp.json()
 
 
+def update_item(access_token: str, ml_item_id: str, changes: dict) -> dict:
+    """Atualiza um anúncio já publicado no Mercado Livre (PUT /items/{id}).
+    `changes` deve conter só os campos que mudaram (ex: price, available_quantity,
+    title). A descrição usa endpoint próprio — veja `update_item_description`."""
+    resp = requests.put(
+        f"{ML_API_BASE}/items/{ml_item_id}",
+        headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"},
+        json=changes,
+        timeout=60,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
+def update_item_description(access_token: str, ml_item_id: str, plain_text: str) -> None:
+    """A descrição de um anúncio no Mercado Livre é atualizada por um
+    endpoint separado do restante do item."""
+    requests.put(
+        f"{ML_API_BASE}/items/{ml_item_id}/description",
+        headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"},
+        json={"plain_text": plain_text},
+        timeout=60,
+    ).raise_for_status()
+
+
 def get_user_id(access_token: str) -> str:
     """Retorna o user_id do vendedor autenticado (dono do token)."""
     resp = requests.get(

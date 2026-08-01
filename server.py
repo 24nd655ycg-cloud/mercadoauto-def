@@ -354,6 +354,30 @@ async def update_product(product_id: str, payload: ProductUpdate, user_id: str =
         raise HTTPException(status_code=404, detail="Produto não encontrado")
     updates = {k: v for k, v in payload.model_dump(exclude_unset=True).items() if v is not None}
     updates["updated_at"] = datetime.now(timezone.utc).isoformat()
+
+    # Se o anúncio já está publicado no Mercado Livre de verdade (não mock),
+    # empurra as mesmas alterações para lá, para o anúncio real ficar igual
+    # ao que foi editado no MercadoAuto.
+    ml_item_id = doc.get("ml_id")
+    if doc.get("status") == "published" and ml_item_id and not doc.get("ml_mock"):
+        user = await db.users.find_one({"id": user_id})
+        if user and user.get("ml_access_token"):
+            item_changes = {}
+            if "title" in updates:
+                item_changes["title"] = updates["title"][:60]
+            if "price" in updates:
+                item_changes["price"] = updates["price"]
+            if "quantity" in updates:
+                item_changes["available_quantity"] = updates["quantity"]
+            try:
+                if item_changes:
+                    ml_utils.update_item(user["ml_access_token"], ml_item_id, item_changes)
+                if "description" in updates:
+                    ml_utils.update_item_description(user["ml_access_token"], ml_item_id, updates["description"])
+            except Exception as e:
+                logger.error(f"Falha ao atualizar anúncio no ML: {e}")
+                raise HTTPException(status_code=502, detail=f"Salvo no MercadoAuto, mas falhou ao atualizar no Mercado Livre: {e}")
+
     await db.products.update_one({"id": product_id}, {"$set": updates})
     doc.update(updates)
     return _product_public(doc)
