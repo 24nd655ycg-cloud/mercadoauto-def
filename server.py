@@ -667,7 +667,7 @@ async def ml_import_listings(user_id: str = Depends(get_current_user_id)):
 
     imported, updated = 0, 0
     for item in listings:
-        existing = await db.products.find_one({"user_id": user_id, "ml_item_id": item["ml_item_id"]})
+        existing = await db.products.find_one({"user_id": user_id, "ml_id": item["ml_item_id"]})
         doc_fields = {
             "user_id": user_id,
             "sku": item["sku"],
@@ -675,7 +675,7 @@ async def ml_import_listings(user_id: str = Depends(get_current_user_id)):
             "price": item["price"],
             "quantity": item["available_quantity"],
             "status": item["status"],
-            "ml_item_id": item["ml_item_id"],
+            "ml_id": item["ml_item_id"],
             "ml_permalink": item.get("permalink"),
             "ml_thumbnail": item.get("thumbnail"),
             "source": "mercado_livre_sync",
