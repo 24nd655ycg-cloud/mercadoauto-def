@@ -481,22 +481,102 @@ def _product_public(doc: dict) -> dict:
 
 
 # ============== Spreadsheet import ==============
+
+# Nomes alternativos de coluna aceitos (comum em exportações de ERPs
+# brasileiros) — tudo é comparado em minúsculas e sem acentos.
+COLUMN_ALIASES = {
+    "sku": {"sku", "codigo", "cod", "id", "referencia", "ref"},
+    "title": {"title", "descricao", "descricaocurta", "nome", "produto"},
+    "price": {"price", "preco", "valor", "precovenda"},
+    "quantity": {"quantity", "estoque", "saldo", "qtd", "quantidade", "saldof"},
+    "brand": {"brand", "marca"},
+    "category": {"category", "categoria", "grupo", "depto", "departamento"},
+    "condition": {"condition", "condicao"},
+    "description": {"description", "descricaolonga", "obs", "observacao"},
+    "images": {"images", "imagens", "fotos"},
+}
+
+
+def _strip_accents(s: str) -> str:
+    import unicodedata
+    return "".join(c for c in unicodedata.normalize("NFKD", s) if not unicodedata.combining(c))
+
+
+def _normalize_columns(df):
+    """Renomeia colunas para os nomes canônicos (sku, title, price...) a
+    partir de nomes alternativos comuns em planilhas de ERPs brasileiros.
+    Se duas colunas dessem o mesmo nome canônico (ex: GRUPO e DEPTO ambos
+    equivalentes a 'category'), só a primeira é convertida — as demais
+    ficam com o nome original e são ignoradas."""
+    rename_map = {}
+    used_canonicals = set()
+    for col in df.columns:
+        key = _strip_accents(str(col).strip().lower()).replace(" ", "").replace("_", "")
+        for canonical, aliases in COLUMN_ALIASES.items():
+            if canonical in used_canonicals:
+                continue
+            normalized_aliases = {_strip_accents(a).replace(" ", "") for a in aliases}
+            if key in normalized_aliases:
+                rename_map[col] = canonical
+                used_canonicals.add(canonical)
+                break
+    return df.rename(columns=rename_map)
+
+
+def _read_spreadsheet(content: bytes, filename: str):
+    """Lê CSV ou Excel de forma tolerante: detecta separador (',' ou ';')
+    e tenta várias codificações comuns antes de desistir (planilhas
+    exportadas de sistemas brasileiros costumam vir em Latin-1/CP1252,
+    não UTF-8)."""
+    if filename.endswith(".csv"):
+        last_error = None
+        for encoding in ("utf-8-sig", "utf-8", "cp1252", "latin-1"):
+            try:
+                return pd.read_csv(io.BytesIO(content), sep=None, engine="python", encoding=encoding, on_bad_lines="skip")
+            except UnicodeDecodeError as e:
+                last_error = e
+                continue
+        raise last_error
+    return pd.read_excel(io.BytesIO(content))
+
+
+def _parse_number(value, default: float = 0.0) -> float:
+    """Converte texto de número para float, aceitando tanto '1234.56' quanto
+    o formato brasileiro '1.234,56' ou simplesmente '1234,56'."""
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return default
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value).strip()
+    if not text:
+        return default
+    if "," in text and "." in text:
+        text = text.replace(".", "").replace(",", ".")
+    elif "," in text:
+        text = text.replace(",", ".")
+    try:
+        return float(text)
+    except ValueError:
+        return default
+
+
 @api.post("/products/import-sheet")
 async def import_sheet(file: UploadFile = File(...), user_id: str = Depends(get_current_user_id)):
     content = await file.read()
     name = (file.filename or "").lower()
     try:
-        if name.endswith(".csv"):
-            df = pd.read_csv(io.BytesIO(content))
-        else:
-            df = pd.read_excel(io.BytesIO(content))
+        df = _read_spreadsheet(content, name)
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Erro ao ler planilha: {e}")
 
+    df = _normalize_columns(df)
     df.columns = [str(c).strip().lower() for c in df.columns]
     required = {"sku", "title", "price"}
     if not required.issubset(set(df.columns)):
-        raise HTTPException(status_code=400, detail=f"Planilha deve conter colunas: {sorted(required)}. Encontradas: {list(df.columns)}")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Planilha deve conter (ou uma coluna equivalente para) : {sorted(required)}. Colunas encontradas: {list(df.columns)}",
+        )
 
     now = datetime.now(timezone.utc).isoformat()
     created = 0
@@ -518,8 +598,8 @@ async def import_sheet(file: UploadFile = File(...), user_id: str = Depends(get_
                 "ai_title": None,
                 "description": str(_get("description", "")),
                 "ai_description": None,
-                "price": float(_get("price", 0)),
-                "quantity": int(float(_get("quantity", 1))),
+                "price": _parse_number(_get("price", 0)),
+                "quantity": int(_parse_number(_get("quantity", 1), default=1)),
                 "brand": str(_get("brand", "")),
                 "category": str(_get("category", "")),
                 "condition": str(_get("condition", "new")) or "new",
@@ -538,6 +618,8 @@ async def import_sheet(file: UploadFile = File(...), user_id: str = Depends(get_
         except Exception as e:
             errors.append({"row": int(idx) + 2, "error": str(e)})
     return {"created": created, "errors": errors}
+
+
 
 
 # ============== External ERP Integration ==============
