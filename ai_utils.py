@@ -73,10 +73,15 @@ def ai_configured() -> bool:
     return bool(ANTHROPIC_API_KEY)
 
 
-async def _call_ai(system_prompt: str, user_prompt: str, max_tokens: int = 1200) -> str | None:
+async def _call_ai(system_prompt: str, user_prompt: str, max_tokens: int = 1200, enable_web_search: bool = False) -> str | None:
     """Chama o provedor de IA configurado (Anthropic ou OpenAI) e devolve o
     texto bruto da resposta, ou None se não houver chave configurada ou a
-    chamada falhar (o chamador decide o fallback nesses casos)."""
+    chamada falhar (o chamador decide o fallback nesses casos).
+
+    `enable_web_search` só tem efeito com o provedor Anthropic (usa a
+    ferramenta de busca na web nativa da API — a própria Anthropic executa
+    a busca e devolve o resultado dentro da mesma chamada). Com OpenAI,
+    esse parâmetro é ignorado por enquanto (sem busca na web nesse caso)."""
     try:
         if AI_PROVIDER == "openai":
             client = _get_openai_client()
@@ -95,12 +100,15 @@ async def _call_ai(system_prompt: str, user_prompt: str, max_tokens: int = 1200)
         client = _get_anthropic_client()
         if not client:
             return None
-        resp = await client.messages.create(
+        kwargs = dict(
             model=ANTHROPIC_MODEL,
             max_tokens=max_tokens,
             system=system_prompt,
             messages=[{"role": "user", "content": user_prompt}],
         )
+        if enable_web_search:
+            kwargs["tools"] = [{"type": "web_search_20250305", "name": "web_search"}]
+        resp = await client.messages.create(**kwargs)
         return "".join(block.text for block in resp.content if block.type == "text")
     except Exception as e:
         logger.error(f"Chamada à IA ({AI_PROVIDER}) falhou: {e}")
@@ -169,8 +177,10 @@ TEMPLATE_SYSTEM_PROMPT = (
     "compatibilidade). Se um dado não estiver disponível nas informações fornecidas, escreva "
     "literalmente 'Não informado' nesse campo específico — não tente adivinhar, mas também não "
     "deixe o colchete original ali.\n"
-    "3. Só use dados de aplicação/veículo (montadora, modelo, motorização, anos) se eles vierem "
-    "explicitamente do título do produto ou da referência real encontrada no Mercado Livre.\n"
+    "3. Use dados de aplicação/veículo (montadora, modelo, motorização, anos) apenas se vierem "
+    "explicitamente do título do produto, da referência real encontrada no Mercado Livre, ou de "
+    "um resultado de busca na web que você tenha feito agora (quando a ferramenta de busca "
+    "estiver disponível) — sempre baseado em fonte real, nunca por suposição.\n"
     "4. Anos no formato 'XX>' (ex: '12>') significam 'a partir de XX', sem ano final — escreva "
     "como '(20XX - atual)'.\n"
     "5. Não remova nem reescreva o texto fixo do modelo — apenas preencha os placeholders.\n\n"
@@ -242,8 +252,15 @@ async def generate_listing_from_template(
     reference_note = (
         f'Referência real encontrada no Mercado Livre (anúncio parecido já publicado): "{ml_reference_title}".'
         if ml_reference_title else
-        "Nenhuma referência real foi encontrada no Mercado Livre para este produto."
+        "Nenhuma referência real foi encontrada no catálogo do Mercado Livre para este produto. "
+        "Use a ferramenta de busca na web (se disponível) para tentar encontrar informações reais "
+        "sobre esta peça (compatibilidade veicular, especificações) a partir do título e/ou código "
+        "informados. Se a busca não trouxer nada confiável, use 'Não informado' normalmente."
     )
+
+    # Só vale a pena gastar uma busca na web quando o catálogo do ML não
+    # achou nada — se já achamos uma referência real lá, não precisa.
+    use_web_search = not ml_reference_title
 
     prompt = (
         f"MODELO DE DESCRIÇÃO A SEGUIR (preencha exatamente esta estrutura):\n---\n{template}\n---\n\n"
@@ -257,8 +274,10 @@ async def generate_listing_from_template(
         "dado real) e gere também um título curto otimizado para busca."
     )
 
-    text = await _call_ai(TEMPLATE_SYSTEM_PROMPT, prompt, max_tokens=1200)
+    text = await _call_ai(TEMPLATE_SYSTEM_PROMPT, prompt, max_tokens=2000, enable_web_search=use_web_search)
     data = _extract_json(text)
+
+    web_search_active = use_web_search and AI_PROVIDER != "openai"
 
     if data and data.get("description"):
         description = data["description"]
@@ -273,6 +292,7 @@ async def generate_listing_from_template(
             "description": description,
             "template_filled": True,
             "ai_completed_fully": not had_gaps,
+            "web_search_used": web_search_active,
         }
 
     # A IA não respondeu nada aproveitável: preenche o template inteiro
@@ -283,4 +303,5 @@ async def generate_listing_from_template(
         "description": _fill_remaining_placeholders(template.replace("{titulo_produto}", raw_title), raw_title, sku, brand),
         "template_filled": True,
         "ai_completed_fully": False,
+        "web_search_used": web_search_active,
     }

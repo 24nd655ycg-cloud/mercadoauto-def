@@ -583,6 +583,26 @@ def _parse_number(value, default: float = 0.0) -> float:
         return default
 
 
+@api.post("/products/fix-sku-quotes")
+async def fix_sku_quotes(user_id: str = Depends(get_current_user_id)):
+    """Correção única: remove o apóstrofo inicial (convenção do Excel) que
+    ficou salvo no SKU/título/marca/categoria de produtos importados antes
+    dessa correção existir. Roda uma vez só; produtos sem apóstrofo não são
+    afetados."""
+    docs = await db.products.find({"user_id": user_id}, {"_id": 0}).to_list(10000)
+    fixed = 0
+    for doc in docs:
+        updates = {}
+        for field in ("sku", "title", "description", "brand", "category"):
+            value = doc.get(field)
+            if isinstance(value, str) and value.startswith("'"):
+                updates[field] = value[1:].strip()
+        if updates:
+            await db.products.update_one({"id": doc["id"]}, {"$set": updates})
+            fixed += 1
+    return {"fixed": fixed, "checked": len(docs)}
+
+
 @api.post("/products/import-sheet")
 async def import_sheet(file: UploadFile = File(...), user_id: str = Depends(get_current_user_id)):
     content = await file.read()
@@ -611,21 +631,31 @@ async def import_sheet(file: UploadFile = File(...), user_id: str = Depends(get_
                 if pd.isna(v):
                     return default
                 return v
+
+            def _clean_text(v, default=""):
+                text = str(v).strip() if v not in (None, "") else default
+                # Remove o apóstrofo inicial que o Excel adiciona para forçar
+                # texto em colunas numéricas (ex: '00123 -> 00123) — ele vaza
+                # pro CSV como caractere literal e atrapalha comparações de SKU.
+                if text.startswith("'"):
+                    text = text[1:]
+                return text.strip()
+
             image_urls = str(_get("images", "")).strip()
             urls = [u.strip() for u in image_urls.split("|") if u.strip()] if image_urls else []
             doc = {
                 "id": str(uuid.uuid4()),
                 "user_id": user_id,
-                "sku": str(_get("sku")),
-                "title": str(_get("title")),
+                "sku": _clean_text(_get("sku")),
+                "title": _clean_text(_get("title")),
                 "ai_title": None,
-                "description": str(_get("description", "")),
+                "description": _clean_text(_get("description", "")),
                 "ai_description": None,
                 "price": _parse_number(_get("price", 0)),
                 "quantity": int(_parse_number(_get("quantity", 1), default=1)),
-                "brand": str(_get("brand", "")),
-                "category": str(_get("category", "")),
-                "condition": str(_get("condition", "new")) or "new",
+                "brand": _clean_text(_get("brand", "")),
+                "category": _clean_text(_get("category", "")),
+                "condition": _clean_text(_get("condition", "new")) or "new",
                 "image_ids": [],
                 "external_image_urls": urls,
                 "status": "draft",
@@ -843,6 +873,7 @@ async def product_ai_suggest(product_id: str, user_id: str = Depends(get_current
         "ai_used": ai_configured(),
         "template_filled": ai_result.get("template_filled", False),
         "ai_completed_fully": ai_result.get("ai_completed_fully", False),
+        "web_search_used": ai_result.get("web_search_used", False),
     }
 
 
