@@ -818,7 +818,7 @@ async def product_ai_suggest(product_id: str, user_id: str = Depends(get_current
     brand = doc.get("brand", "")
     category = doc.get("category", "")
 
-    suggestion = ml_utils.suggest_from_sku(sku or title, brand)
+    suggestion = ml_utils.suggest_from_sku(title=title, sku=sku, brand=brand)
 
     suggested_price = None
     if suggestion.get("found") and suggestion.get("price_min") and suggestion.get("price_max"):
@@ -842,6 +842,7 @@ async def product_ai_suggest(product_id: str, user_id: str = Depends(get_current
         "suggested_price": suggested_price,
         "ai_used": ai_configured(),
         "template_filled": ai_result.get("template_filled", False),
+        "ai_completed_fully": ai_result.get("ai_completed_fully", False),
     }
 
 
@@ -865,7 +866,7 @@ async def lookup_sku(sku: str, brand: str = "", user_id: str = Depends(get_curre
             "price": existing.get("price"),
         }
 
-    suggestion = ml_utils.suggest_from_sku(sku, brand)
+    suggestion = ml_utils.suggest_from_sku(sku=sku, brand=brand)
     if not suggestion.get("found"):
         return {"found": False}
 

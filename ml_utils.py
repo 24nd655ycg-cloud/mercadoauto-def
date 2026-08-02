@@ -218,27 +218,43 @@ def search_public_listings(query: str, limit: int = 10, site_id: str = "MLB") ->
     return results
 
 
-def suggest_from_sku(sku: str, brand: str = "") -> dict:
-    """Gera uma sugestão de título e faixa de preço a partir de anúncios reais
-    e já publicados no Mercado Livre que combinem com o SKU/marca informados."""
-    query = " ".join(filter(None, [brand, sku])).strip()
-    if not query:
-        return {"found": False}
-    try:
-        results = search_public_listings(query, limit=10)
-    except Exception as e:
-        logger.error(f"Busca pública no ML falhou: {e}")
-        results = []
-    if not results:
-        return {"found": False}
-    prices = [r["price"] for r in results if r.get("price")]
-    return {
-        "found": True,
-        "suggested_title": results[0]["title"],
-        "price_min": min(prices) if prices else None,
-        "price_max": max(prices) if prices else None,
-        "sample_count": len(results),
-    }
+def suggest_from_sku(title: str = "", sku: str = "", brand: str = "") -> dict:
+    """Sugere título de referência e faixa de preço buscando anúncios reais
+    e parecidos no catálogo público do Mercado Livre. Usa o TÍTULO do
+    produto como termo principal — é o dado com chance real de bater com
+    algo (nome/modelo do veículo, tipo de peça), diferente do SKU (código
+    interno, sem relação com o texto de anúncios reais) ou da marca sozinha
+    (frequentemente vazia). Só cai para marca+SKU como último recurso, caso
+    a busca pelo título não encontre nada."""
+    attempts = []
+    clean_title = (title or "").strip()
+    if clean_title:
+        # Limita o tamanho da query — títulos muito longos (comuns em
+        # autopeças, com vários veículos compatíveis) tendem a piorar a
+        # busca em vez de ajudar; as primeiras palavras já carregam a
+        # marca/modelo principal.
+        attempts.append(clean_title[:100])
+    fallback_query = " ".join(filter(None, [brand, sku])).strip()
+    if fallback_query:
+        attempts.append(fallback_query)
+
+    for query in attempts:
+        try:
+            results = search_public_listings(query, limit=10)
+        except Exception as e:
+            logger.error(f"Busca pública no ML falhou para '{query}': {e}")
+            results = []
+        if results:
+            prices = [r["price"] for r in results if r.get("price")]
+            return {
+                "found": True,
+                "suggested_title": results[0]["title"],
+                "price_min": min(prices) if prices else None,
+                "price_max": max(prices) if prices else None,
+                "sample_count": len(results),
+                "query_used": query,
+            }
+    return {"found": False}
 
 
 def mock_publish(product: dict) -> dict:

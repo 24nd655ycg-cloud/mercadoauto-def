@@ -191,6 +191,38 @@ def _has_unfilled_placeholders(text: str) -> bool:
     return bool(_PLACEHOLDER_PATTERN.search(text or ""))
 
 
+_PLACEHOLDER_PATTERN = re.compile(r"\[[^\]\n]{1,60}\]|\{[^}\n]{1,60}\}")
+
+
+def _has_unfilled_placeholders(text: str) -> bool:
+    return bool(_PLACEHOLDER_PATTERN.search(text or ""))
+
+
+def _strip_accents(s: str) -> str:
+    import unicodedata
+    return "".join(c for c in unicodedata.normalize("NFKD", s) if not unicodedata.combining(c))
+
+
+def _fill_remaining_placeholders(text: str, raw_title: str, sku: str, brand: str) -> str:
+    """Rede de segurança determinística: substitui qualquer [placeholder] ou
+    {placeholder} que a IA tenha deixado sem preencher. Usa dado real do
+    produto quando o nome do placeholder indica claramente qual campo é
+    (ex: contém 'sku'/'codigo' -> usa o SKU real); caso contrário, usa
+    'Não informado' — nunca deixa um colchete chegar até o usuário."""
+
+    def _replace(match: re.Match) -> str:
+        inner = _strip_accents(match.group(0)[1:-1].strip().lower())
+        if "sku" in inner or "codigo" in inner or "referencia" in inner:
+            return sku if sku else "Não informado"
+        if "marca" in inner or "fabricante" in inner or "montadora" in inner:
+            return brand if brand else "Não informado"
+        if "nome" in inner or "produto" in inner or "peca" in inner or "titulo" in inner:
+            return raw_title if raw_title else "Não informado"
+        return "Não informado"
+
+    return _PLACEHOLDER_PATTERN.sub(_replace, text or "")
+
+
 async def generate_listing_from_template(
     template: str,
     raw_title: str,
@@ -200,8 +232,10 @@ async def generate_listing_from_template(
     ml_reference_title: str | None = None,
 ) -> dict:
     """Preenche o template de descrição (da empresa, ou o padrão) e gera o
-    título otimizado — em UMA única chamada à IA. Nunca inventa dado
-    técnico — usa 'Não informado' quando não sabe."""
+    título otimizado — em UMA única chamada à IA. A IA cuida do conteúdo
+    (aplicação, diferenciais); o CÓDIGO garante, depois, que nenhum
+    placeholder fica sem preencher — nunca inventa dado técnico, usa
+    'Não informado' quando não sabe."""
     if not ai_configured():
         return {"title": raw_title[:60], "description": template.replace("{titulo_produto}", raw_title), "template_filled": False}
 
@@ -226,37 +260,27 @@ async def generate_listing_from_template(
     text = await _call_ai(TEMPLATE_SYSTEM_PROMPT, prompt, max_tokens=1200)
     data = _extract_json(text)
 
-    if data and data.get("description") and _has_unfilled_placeholders(data["description"]):
-        # O modelo devolveu o template sem preencher tudo — tenta mais uma
-        # vez com uma instrução mais direta antes de desistir.
-        retry_prompt = prompt + (
-            "\n\nATENÇÃO: numa tentativa anterior você devolveu a descrição com colchetes/chaves "
-            "ainda visíveis, o que é proibido. Desta vez, substitua ABSOLUTAMENTE TODOS os "
-            "placeholders — use 'Não informado' em qualquer um que você não souber preencher com "
-            "dado real. A descrição final não pode conter nenhum caractere '[' ']' '{' '}'."
-        )
-        text = await _call_ai(TEMPLATE_SYSTEM_PROMPT, retry_prompt, max_tokens=1200)
-        retry_data = _extract_json(text)
-        if retry_data and retry_data.get("description"):
-            data = retry_data
-
-    if data and data.get("description") and not _has_unfilled_placeholders(data["description"]):
-        return {
-            "title": (data.get("title") or raw_title)[:60],
-            "description": data["description"],
-            "template_filled": True,
-        }
     if data and data.get("description"):
-        # Preencheu algo, mas ainda sobrou placeholder — devolve mesmo
-        # assim (é melhor que nada), mas avisa o front-end que não ficou
-        # 100% preenchido para o usuário revisar com atenção.
+        description = data["description"]
+        had_gaps = _has_unfilled_placeholders(description)
+        if had_gaps:
+            # O código fecha qualquer lacuna que a IA tenha deixado — nunca
+            # chega colchete/chave até o usuário, independente do que a IA
+            # tenha "esquecido".
+            description = _fill_remaining_placeholders(description, raw_title, sku, brand)
         return {
             "title": (data.get("title") or raw_title)[:60],
-            "description": data["description"],
-            "template_filled": False,
+            "description": description,
+            "template_filled": True,
+            "ai_completed_fully": not had_gaps,
         }
+
+    # A IA não respondeu nada aproveitável: preenche o template inteiro
+    # usando só a rede de segurança (garante que nada fica em branco/colchete,
+    # mesmo sem nenhuma contribuição da IA).
     return {
         "title": raw_title[:60],
-        "description": template.replace("{titulo_produto}", raw_title),
-        "template_filled": False,
+        "description": _fill_remaining_placeholders(template.replace("{titulo_produto}", raw_title), raw_title, sku, brand),
+        "template_filled": True,
+        "ai_completed_fully": False,
     }
