@@ -261,7 +261,7 @@ async def upload_image(file: UploadFile = File(...), user_id: str = Depends(get_
     data = await file.read()
     content_type = file.content_type or MIME_TYPES[ext]
     try:
-        result = put_object(path, data, content_type)
+        result = await put_object(path, data, content_type)
     except Exception as e:
         logger.error(f"upload failed: {e}")
         raise HTTPException(status_code=500, detail="Falha ao enviar arquivo")
@@ -295,7 +295,10 @@ async def get_file(file_id: str, auth: Optional[str] = Query(None), authorizatio
     record = await db.files.find_one({"id": file_id, "user_id": user_id, "is_deleted": False})
     if not record:
         raise HTTPException(status_code=404, detail="Arquivo não encontrado")
-    data, content_type = get_object(record["storage_path"])
+    try:
+        data, content_type = await get_object(record["storage_path"])
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Arquivo não encontrado no storage")
     return Response(content=data, media_type=record.get("content_type", content_type))
 
 
