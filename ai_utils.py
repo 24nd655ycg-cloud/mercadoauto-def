@@ -159,20 +159,36 @@ TEMPLATE_SYSTEM_PROMPT = (
     "A empresa forneceu o modelo de descrição exatamente como deve ser seguido — respeite a "
     "estrutura, as quebras de linha, os títulos de bloco (ex: ------ CARACTERÍSTICAS ------) e "
     "qualquer texto fixo do modelo (incluindo rodapé/assinatura da empresa) EXATAMENTE como está "
-    "escrito. Troque apenas os placeholders entre colchetes ou chaves pelas informações reais "
-    "fornecidas.\n\n"
+    "escrito.\n\n"
     "REGRAS OBRIGATÓRIAS:\n"
-    "1. NUNCA invente informação técnica que não foi fornecida (marca, código, ano, motorização, "
+    "1. TODO placeholder entre colchetes [ASSIM] ou chaves {assim} DEVE ser substituído — "
+    "pela informação real, se você tiver, ou pela palavra 'Não informado', se não tiver. "
+    "PROIBIDO devolver a descrição final com qualquer colchete [ ] ou chave { } ainda visível — "
+    "isso é considerado uma falha grave.\n"
+    "2. NUNCA invente informação técnica que não foi fornecida (marca, código, ano, motorização, "
     "compatibilidade). Se um dado não estiver disponível nas informações fornecidas, escreva "
-    "literalmente 'Não informado' nesse campo — não tente adivinhar.\n"
-    "2. Só use dados de aplicação/veículo (montadora, modelo, motorização, anos) se eles vierem "
+    "literalmente 'Não informado' nesse campo específico — não tente adivinhar, mas também não "
+    "deixe o colchete original ali.\n"
+    "3. Só use dados de aplicação/veículo (montadora, modelo, motorização, anos) se eles vierem "
     "explicitamente do título do produto ou da referência real encontrada no Mercado Livre.\n"
-    "3. Anos no formato 'XX>' (ex: '12>') significam 'a partir de XX', sem ano final — escreva "
+    "4. Anos no formato 'XX>' (ex: '12>') significam 'a partir de XX', sem ano final — escreva "
     "como '(20XX - atual)'.\n"
-    "4. Não remova nem reescreva blocos do modelo — apenas preencha os placeholders.\n"
-    "5. Responda estritamente com um objeto JSON válido no formato "
+    "5. Não remova nem reescreva o texto fixo do modelo — apenas preencha os placeholders.\n\n"
+    "EXEMPLO — se o modelo tem a linha:\n"
+    "Marca: [Fabricante] (Original [Montadora])\n"
+    "e você só sabe a montadora (Fiat) mas não o fabricante da peça específica, escreva:\n"
+    "Marca: Não informado (Original Fiat)\n"
+    "— nunca deixe '[Fabricante]' ou '[Montadora]' no texto final.\n\n"
+    "Responda estritamente com um objeto JSON válido no formato "
     '{"title": "...", "description": "..."} — sem markdown, sem texto adicional, sem crases.'
 )
+
+
+_PLACEHOLDER_PATTERN = re.compile(r"\[[A-ZÀ-Ú][^\]\n]{0,60}\]|\{[a-z_]{2,40}\}")
+
+
+def _has_unfilled_placeholders(text: str) -> bool:
+    return bool(_PLACEHOLDER_PATTERN.search(text or ""))
 
 
 async def generate_listing_from_template(
@@ -187,7 +203,7 @@ async def generate_listing_from_template(
     título otimizado — em UMA única chamada à IA. Nunca inventa dado
     técnico — usa 'Não informado' quando não sabe."""
     if not ai_configured():
-        return {"title": raw_title[:60], "description": template.replace("{titulo_produto}", raw_title)}
+        return {"title": raw_title[:60], "description": template.replace("{titulo_produto}", raw_title), "template_filled": False}
 
     reference_note = (
         f'Referência real encontrada no Mercado Livre (anúncio parecido já publicado): "{ml_reference_title}".'
@@ -209,9 +225,38 @@ async def generate_listing_from_template(
 
     text = await _call_ai(TEMPLATE_SYSTEM_PROMPT, prompt, max_tokens=1200)
     data = _extract_json(text)
-    if data and data.get("description"):
+
+    if data and data.get("description") and _has_unfilled_placeholders(data["description"]):
+        # O modelo devolveu o template sem preencher tudo — tenta mais uma
+        # vez com uma instrução mais direta antes de desistir.
+        retry_prompt = prompt + (
+            "\n\nATENÇÃO: numa tentativa anterior você devolveu a descrição com colchetes/chaves "
+            "ainda visíveis, o que é proibido. Desta vez, substitua ABSOLUTAMENTE TODOS os "
+            "placeholders — use 'Não informado' em qualquer um que você não souber preencher com "
+            "dado real. A descrição final não pode conter nenhum caractere '[' ']' '{' '}'."
+        )
+        text = await _call_ai(TEMPLATE_SYSTEM_PROMPT, retry_prompt, max_tokens=1200)
+        retry_data = _extract_json(text)
+        if retry_data and retry_data.get("description"):
+            data = retry_data
+
+    if data and data.get("description") and not _has_unfilled_placeholders(data["description"]):
         return {
             "title": (data.get("title") or raw_title)[:60],
             "description": data["description"],
+            "template_filled": True,
         }
-    return {"title": raw_title[:60], "description": template.replace("{titulo_produto}", raw_title)}
+    if data and data.get("description"):
+        # Preencheu algo, mas ainda sobrou placeholder — devolve mesmo
+        # assim (é melhor que nada), mas avisa o front-end que não ficou
+        # 100% preenchido para o usuário revisar com atenção.
+        return {
+            "title": (data.get("title") or raw_title)[:60],
+            "description": data["description"],
+            "template_filled": False,
+        }
+    return {
+        "title": raw_title[:60],
+        "description": template.replace("{titulo_produto}", raw_title),
+        "template_filled": False,
+    }

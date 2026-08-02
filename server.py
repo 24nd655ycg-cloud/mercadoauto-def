@@ -841,6 +841,7 @@ async def product_ai_suggest(product_id: str, user_id: str = Depends(get_current
         "description": ai_result["description"],
         "suggested_price": suggested_price,
         "ai_used": ai_configured(),
+        "template_filled": ai_result.get("template_filled", False),
     }
 
 
