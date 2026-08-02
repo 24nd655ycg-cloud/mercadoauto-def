@@ -97,11 +97,13 @@ async def generate_listing_content(raw_title: str, raw_description: str, brand: 
 
 
 TEMPLATE_SYSTEM_PROMPT = (
-    "Você preenche um MODELO DE DESCRIÇÃO de anúncio de autopeças para o Mercado Livre Brasil. "
-    "A empresa forneceu o modelo exatamente como deve ser seguido — respeite a estrutura, "
-    "as quebras de linha, os títulos de bloco (ex: ------ CARACTERÍSTICAS ------) e qualquer "
-    "texto fixo do modelo (incluindo rodapé/assinatura da empresa) EXATAMENTE como está escrito. "
-    "Troque apenas os placeholders entre colchetes ou chaves pelas informações reais fornecidas.\n\n"
+    "Você preenche um MODELO DE DESCRIÇÃO de anúncio de autopeças para o Mercado Livre Brasil, "
+    "e também escreve um título curto e otimizado para busca (máximo 60 caracteres). "
+    "A empresa forneceu o modelo de descrição exatamente como deve ser seguido — respeite a "
+    "estrutura, as quebras de linha, os títulos de bloco (ex: ------ CARACTERÍSTICAS ------) e "
+    "qualquer texto fixo do modelo (incluindo rodapé/assinatura da empresa) EXATAMENTE como está "
+    "escrito. Troque apenas os placeholders entre colchetes ou chaves pelas informações reais "
+    "fornecidas.\n\n"
     "REGRAS OBRIGATÓRIAS:\n"
     "1. NUNCA invente informação técnica que não foi fornecida (marca, código, ano, motorização, "
     "compatibilidade). Se um dado não estiver disponível nas informações fornecidas, escreva "
@@ -112,26 +114,25 @@ TEMPLATE_SYSTEM_PROMPT = (
     "como '(20XX - atual)'.\n"
     "4. Não remova nem reescreva blocos do modelo — apenas preencha os placeholders.\n"
     "5. Responda estritamente com um objeto JSON válido no formato "
-    '{"description": "..."} — sem markdown, sem texto adicional, sem crases.'
+    '{"title": "...", "description": "..."} — sem markdown, sem texto adicional, sem crases.'
 )
 
 
-async def generate_from_template(
+async def generate_listing_from_template(
     template: str,
     raw_title: str,
     sku: str,
     brand: str = "",
     category: str = "",
     ml_reference_title: str | None = None,
-) -> str:
-    """Preenche o template de descrição (da empresa, ou o padrão) com os
-    dados reais do produto. Nunca inventa dado técnico — usa 'Não informado'
-    quando não sabe, seguindo a mesma regra testada com o usuário."""
+) -> dict:
+    """Preenche o template de descrição (da empresa, ou o padrão) e gera o
+    título otimizado — em UMA única chamada à IA, para evitar duas idas
+    sequenciais que podem estourar timeout. Nunca inventa dado técnico —
+    usa 'Não informado' quando não sabe."""
     client = _get_client()
     if not client:
-        # Sem chave de IA configurada: devolve o template com um
-        # preenchimento mínimo e honesto, sem tentar "adivinhar" nada.
-        return template.replace("{titulo_produto}", raw_title)
+        return {"title": raw_title[:60], "description": template.replace("{titulo_produto}", raw_title)}
 
     reference_note = (
         f'Referência real encontrada no Mercado Livre (anúncio parecido já publicado): "{ml_reference_title}".'
@@ -140,15 +141,15 @@ async def generate_from_template(
     )
 
     prompt = (
-        f"MODELO A SEGUIR (preencha exatamente esta estrutura):\n---\n{template}\n---\n\n"
+        f"MODELO DE DESCRIÇÃO A SEGUIR (preencha exatamente esta estrutura):\n---\n{template}\n---\n\n"
         f"DADOS REAIS DISPONÍVEIS:\n"
         f"Título/nome do produto: {raw_title}\n"
         f"SKU (código interno): {sku or 'não informado'}\n"
         f"Marca: {brand or 'não informada'}\n"
         f"Categoria: {category or 'não informada'}\n"
         f"{reference_note}\n\n"
-        "Preencha o modelo acima com esses dados. Use 'Não informado' em qualquer "
-        "placeholder para o qual não haja dado real disponível."
+        "Preencha o modelo de descrição com esses dados (use 'Não informado' onde não houver "
+        "dado real) e gere também um título curto otimizado para busca."
     )
 
     try:
@@ -163,8 +164,11 @@ async def generate_from_template(
         if match:
             data = json.loads(match.group(0))
             if data.get("description"):
-                return data["description"]
+                return {
+                    "title": (data.get("title") or raw_title)[:60],
+                    "description": data["description"],
+                }
     except Exception as e:
         logger.error(f"Template AI generation failed: {e}")
 
-    return template.replace("{titulo_produto}", raw_title)
+    return {"title": raw_title[:60], "description": template.replace("{titulo_produto}", raw_title)}

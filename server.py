@@ -25,7 +25,7 @@ import re
 
 from auth_utils import hash_password, verify_password, create_access_token, get_current_user_id
 from storage_utils import init_storage, put_object, get_object, APP_NAME, MIME_TYPES
-from ai_utils import generate_listing_content, generate_from_template, DEFAULT_DESCRIPTION_TEMPLATE
+from ai_utils import generate_listing_content, generate_listing_from_template, DEFAULT_DESCRIPTION_TEMPLATE
 import ml_utils
 
 mongo_url = os.environ["MONGO_URL"]
@@ -824,7 +824,7 @@ async def product_ai_suggest(product_id: str, user_id: str = Depends(get_current
     if suggestion.get("found") and suggestion.get("price_min") and suggestion.get("price_max"):
         suggested_price = round((suggestion["price_min"] + suggestion["price_max"]) / 2, 2)
 
-    description = await generate_from_template(
+    ai_result = await generate_listing_from_template(
         template=template,
         raw_title=title,
         sku=sku,
@@ -833,16 +833,11 @@ async def product_ai_suggest(product_id: str, user_id: str = Depends(get_current
         ml_reference_title=suggestion.get("suggested_title") if suggestion.get("found") else None,
     )
 
-    # O título do anúncio (campo separado da descrição) continua otimizado
-    # à parte, curto e dentro do limite do Mercado Livre.
-    ai_title_result = await generate_listing_content(raw_title=title, raw_description=title, brand=brand, category=category)
-
     return {
         "found_reference": suggestion.get("found", False),
         "reference_title": suggestion.get("suggested_title"),
         "sample_count": suggestion.get("sample_count", 0),
-        "title": ai_title_result["title"],
-        "description": description,
+        "title": ai_result["title"],
         "description": ai_result["description"],
         "suggested_price": suggested_price,
     }
