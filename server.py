@@ -20,6 +20,7 @@ from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field, ConfigDict, field_validator
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
+from pymongo import UpdateOne
 import pandas as pd
 import re
 
@@ -588,9 +589,10 @@ async def fix_sku_quotes(user_id: str = Depends(get_current_user_id)):
     """Correção única: remove o apóstrofo inicial (convenção do Excel) que
     ficou salvo no SKU/título/marca/categoria de produtos importados antes
     dessa correção existir. Roda uma vez só; produtos sem apóstrofo não são
-    afetados."""
+    afetados. Usa uma única operação em lote (bulk_write) para não estourar
+    o tempo de resposta com centenas/milhares de produtos."""
     docs = await db.products.find({"user_id": user_id}, {"_id": 0}).to_list(10000)
-    fixed = 0
+    operations = []
     for doc in docs:
         updates = {}
         for field in ("sku", "title", "description", "brand", "category"):
@@ -598,8 +600,12 @@ async def fix_sku_quotes(user_id: str = Depends(get_current_user_id)):
             if isinstance(value, str) and value.startswith("'"):
                 updates[field] = value[1:].strip()
         if updates:
-            await db.products.update_one({"id": doc["id"]}, {"$set": updates})
-            fixed += 1
+            operations.append(UpdateOne({"id": doc["id"]}, {"$set": updates}))
+
+    fixed = 0
+    if operations:
+        result = await db.products.bulk_write(operations, ordered=False)
+        fixed = result.modified_count
     return {"fixed": fixed, "checked": len(docs)}
 
 
