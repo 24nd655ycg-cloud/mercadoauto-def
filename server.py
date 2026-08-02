@@ -25,7 +25,7 @@ import re
 
 from auth_utils import hash_password, verify_password, create_access_token, get_current_user_id
 from storage_utils import init_storage, put_object, get_object, APP_NAME, MIME_TYPES
-from ai_utils import generate_listing_content
+from ai_utils import generate_listing_content, generate_from_template, DEFAULT_DESCRIPTION_TEMPLATE
 import ml_utils
 
 mongo_url = os.environ["MONGO_URL"]
@@ -189,6 +189,7 @@ async def register(payload: UserRegister):
         "ml_access_token": None,
         "ml_refresh_token": None,
         "ml_token_expires_at": None,
+        "description_template": None,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
     await db.users.insert_one(doc)
@@ -224,10 +225,32 @@ def _user_public(doc: dict) -> dict:
         "ml_client_id": doc.get("ml_client_id") or "",
         "ml_redirect_uri": doc.get("ml_redirect_uri") or "",
         "ml_has_secret": bool(doc.get("ml_client_secret")),
+        "description_template": doc.get("description_template"),
     }
 
 
 # ============== File uploads (product photos) ==============
+class CompanySettingsIn(BaseDoc):
+    company_name: Optional[str] = None
+    description_template: Optional[str] = None
+
+
+@api.patch("/company/settings")
+async def update_company_settings(payload: CompanySettingsIn, user_id: str = Depends(get_current_user_id)):
+    updates = {}
+    if payload.company_name is not None and payload.company_name.strip():
+        updates["company_name"] = payload.company_name.strip()
+    if payload.description_template is not None:
+        # string vazia = empresa optou por remover o template próprio e
+        # voltar a usar o modelo padrão
+        updates["description_template"] = payload.description_template.strip() or None
+    if not updates:
+        raise HTTPException(status_code=400, detail="Nada para atualizar")
+    await db.users.update_one({"id": user_id}, {"$set": updates})
+    doc = await db.users.find_one({"id": user_id})
+    return _user_public(doc)
+
+
 @api.post("/uploads")
 async def upload_image(file: UploadFile = File(...), user_id: str = Depends(get_current_user_id)):
     ext = (file.filename or "").split(".")[-1].lower() if "." in (file.filename or "") else "jpg"
@@ -779,11 +802,16 @@ async def ml_import_listings(user_id: str = Depends(get_current_user_id)):
 async def product_ai_suggest(product_id: str, user_id: str = Depends(get_current_user_id)):
     """Botão 'Gerar com IA' na edição do anúncio: busca anúncios reais e
     parecidos no catálogo público do Mercado Livre (por SKU/título/marca),
-    usa essas referências para a IA escrever uma descrição, e sugere um
-    preço médio a partir da faixa de preço encontrada."""
+    e usa o template de descrição da empresa (ou o modelo padrão, se ela
+    não tiver configurado o próprio) para escrever a descrição — nunca
+    inventando dado técnico que não foi encontrado. Também sugere um preço
+    médio a partir da faixa de preço encontrada."""
     doc = await db.products.find_one({"id": product_id, "user_id": user_id})
     if not doc:
         raise HTTPException(status_code=404, detail="Produto não encontrado")
+
+    user = await db.users.find_one({"id": user_id})
+    template = (user or {}).get("description_template") or DEFAULT_DESCRIPTION_TEMPLATE
 
     sku = doc.get("sku", "")
     title = doc.get("title", "")
@@ -792,31 +820,29 @@ async def product_ai_suggest(product_id: str, user_id: str = Depends(get_current
 
     suggestion = ml_utils.suggest_from_sku(sku or title, brand)
 
-    reference_note = ""
     suggested_price = None
-    if suggestion.get("found"):
-        reference_note = (
-            f"Título de referência encontrado em anúncios reais e parecidos no Mercado Livre: "
-            f"\"{suggestion['suggested_title']}\"."
-        )
-        if suggestion.get("price_min") and suggestion.get("price_max"):
-            suggested_price = round((suggestion["price_min"] + suggestion["price_max"]) / 2, 2)
+    if suggestion.get("found") and suggestion.get("price_min") and suggestion.get("price_max"):
+        suggested_price = round((suggestion["price_min"] + suggestion["price_max"]) / 2, 2)
 
-    raw_description = doc.get("description") or ""
-    combined_context = (raw_description + " " + reference_note).strip()
-
-    ai_result = await generate_listing_content(
+    description = await generate_from_template(
+        template=template,
         raw_title=title,
-        raw_description=combined_context or title,
+        sku=sku,
         brand=brand,
         category=category,
+        ml_reference_title=suggestion.get("suggested_title") if suggestion.get("found") else None,
     )
+
+    # O título do anúncio (campo separado da descrição) continua otimizado
+    # à parte, curto e dentro do limite do Mercado Livre.
+    ai_title_result = await generate_listing_content(raw_title=title, raw_description=title, brand=brand, category=category)
 
     return {
         "found_reference": suggestion.get("found", False),
         "reference_title": suggestion.get("suggested_title"),
         "sample_count": suggestion.get("sample_count", 0),
-        "title": ai_result["title"],
+        "title": ai_title_result["title"],
+        "description": description,
         "description": ai_result["description"],
         "suggested_price": suggested_price,
     }
