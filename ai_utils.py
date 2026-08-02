@@ -1,16 +1,20 @@
-"""AI content generation with Claude, via a real Anthropic API key (console.anthropic.com).
-Substitui a versão anterior, que dependia do pacote interno `emergentintegrations`
-e só funcionava dentro da plataforma Emergent."""
+"""AI content generation — suporta Anthropic (Claude) ou OpenAI, escolhido
+pela variável de ambiente AI_PROVIDER ("anthropic" por padrão, ou "openai").
+Configure a chave correspondente (ANTHROPIC_API_KEY ou OPENAI_API_KEY)."""
 import os
 import json
 import logging
 import re
-from anthropic import AsyncAnthropic
 
 logger = logging.getLogger(__name__)
 
+AI_PROVIDER = os.environ.get("AI_PROVIDER", "anthropic").strip().lower()
+
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
-MODEL_NAME = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-5")
+ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-5")
+
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
 
 # Usado quando a empresa ainda não configurou o próprio modelo de descrição
 # (aba Configurações → Descrição modelo).
@@ -37,16 +41,82 @@ Peça nova, original ou equivalente de mercado, pronta para uso.
 —
 Dúvidas? Chame antes de comprar — respondemos rápido."""
 
-_client: AsyncAnthropic | None = None
+
+_anthropic_client = None
+_openai_client = None
 
 
-def _get_client() -> AsyncAnthropic | None:
-    global _client
+def _get_anthropic_client():
+    global _anthropic_client
     if not ANTHROPIC_API_KEY:
         return None
-    if _client is None:
-        _client = AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
-    return _client
+    if _anthropic_client is None:
+        from anthropic import AsyncAnthropic
+        _anthropic_client = AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
+    return _anthropic_client
+
+
+def _get_openai_client():
+    global _openai_client
+    if not OPENAI_API_KEY:
+        return None
+    if _openai_client is None:
+        from openai import AsyncOpenAI
+        _openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+    return _openai_client
+
+
+def ai_configured() -> bool:
+    """True se o provedor escolhido em AI_PROVIDER tem uma chave configurada."""
+    if AI_PROVIDER == "openai":
+        return bool(OPENAI_API_KEY)
+    return bool(ANTHROPIC_API_KEY)
+
+
+async def _call_ai(system_prompt: str, user_prompt: str, max_tokens: int = 1200) -> str | None:
+    """Chama o provedor de IA configurado (Anthropic ou OpenAI) e devolve o
+    texto bruto da resposta, ou None se não houver chave configurada ou a
+    chamada falhar (o chamador decide o fallback nesses casos)."""
+    try:
+        if AI_PROVIDER == "openai":
+            client = _get_openai_client()
+            if not client:
+                return None
+            resp = await client.chat.completions.create(
+                model=OPENAI_MODEL,
+                max_tokens=max_tokens,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+            )
+            return resp.choices[0].message.content
+
+        client = _get_anthropic_client()
+        if not client:
+            return None
+        resp = await client.messages.create(
+            model=ANTHROPIC_MODEL,
+            max_tokens=max_tokens,
+            system=system_prompt,
+            messages=[{"role": "user", "content": user_prompt}],
+        )
+        return "".join(block.text for block in resp.content if block.type == "text")
+    except Exception as e:
+        logger.error(f"Chamada à IA ({AI_PROVIDER}) falhou: {e}")
+        return None
+
+
+def _extract_json(text: str) -> dict | None:
+    if not text:
+        return None
+    match = re.search(r"\{.*\}", text, re.DOTALL)
+    if not match:
+        return None
+    try:
+        return json.loads(match.group(0))
+    except json.JSONDecodeError:
+        return None
 
 
 SYSTEM_PROMPT = (
@@ -62,11 +132,10 @@ SYSTEM_PROMPT = (
 
 
 async def generate_listing_content(raw_title: str, raw_description: str, brand: str = "", category: str = "") -> dict:
-    """Generates optimized title & description. Returns dict with keys `title` and `description`.
-    Faz fallback silencioso para os dados brutos se a chave não estiver configurada
+    """Generates optimized title & description. Returns dict com `title` e `description`.
+    Faz fallback silencioso para os dados brutos se nenhuma chave estiver configurada
     ou se a chamada à API falhar — o anúncio nunca fica bloqueado por causa da IA."""
-    client = _get_client()
-    if not client:
+    if not ai_configured():
         return {"title": raw_title, "description": raw_description}
 
     prompt = (
@@ -74,25 +143,13 @@ async def generate_listing_content(raw_title: str, raw_description: str, brand: 
         f"Categoria: {category or 'não informada'}\nDescrição bruta: {raw_description}\n\n"
         "Gere título e descrição otimizados."
     )
-
-    try:
-        resp = await client.messages.create(
-            model=MODEL_NAME,
-            max_tokens=1000,
-            system=SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        text = "".join(block.text for block in resp.content if block.type == "text")
-        match = re.search(r"\{.*\}", text, re.DOTALL)
-        if match:
-            data = json.loads(match.group(0))
-            return {
-                "title": (data.get("title") or raw_title)[:60],
-                "description": data.get("description") or raw_description,
-            }
-    except Exception as e:
-        logger.error(f"AI generation failed: {e}")
-
+    text = await _call_ai(SYSTEM_PROMPT, prompt, max_tokens=1000)
+    data = _extract_json(text)
+    if data:
+        return {
+            "title": (data.get("title") or raw_title)[:60],
+            "description": data.get("description") or raw_description,
+        }
     return {"title": raw_title, "description": raw_description}
 
 
@@ -127,11 +184,9 @@ async def generate_listing_from_template(
     ml_reference_title: str | None = None,
 ) -> dict:
     """Preenche o template de descrição (da empresa, ou o padrão) e gera o
-    título otimizado — em UMA única chamada à IA, para evitar duas idas
-    sequenciais que podem estourar timeout. Nunca inventa dado técnico —
-    usa 'Não informado' quando não sabe."""
-    client = _get_client()
-    if not client:
+    título otimizado — em UMA única chamada à IA. Nunca inventa dado
+    técnico — usa 'Não informado' quando não sabe."""
+    if not ai_configured():
         return {"title": raw_title[:60], "description": template.replace("{titulo_produto}", raw_title)}
 
     reference_note = (
@@ -152,23 +207,11 @@ async def generate_listing_from_template(
         "dado real) e gere também um título curto otimizado para busca."
     )
 
-    try:
-        resp = await client.messages.create(
-            model=MODEL_NAME,
-            max_tokens=1200,
-            system=TEMPLATE_SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        text = "".join(block.text for block in resp.content if block.type == "text")
-        match = re.search(r"\{.*\}", text, re.DOTALL)
-        if match:
-            data = json.loads(match.group(0))
-            if data.get("description"):
-                return {
-                    "title": (data.get("title") or raw_title)[:60],
-                    "description": data["description"],
-                }
-    except Exception as e:
-        logger.error(f"Template AI generation failed: {e}")
-
+    text = await _call_ai(TEMPLATE_SYSTEM_PROMPT, prompt, max_tokens=1200)
+    data = _extract_json(text)
+    if data and data.get("description"):
+        return {
+            "title": (data.get("title") or raw_title)[:60],
+            "description": data["description"],
+        }
     return {"title": raw_title[:60], "description": template.replace("{titulo_produto}", raw_title)}
