@@ -366,6 +366,40 @@ async def list_products(
     return [_product_public(d) for d in docs]
 
 
+@api.get("/products/lookup-sku")
+async def lookup_sku(sku: str, brand: str = "", user_id: str = Depends(get_current_user_id)):
+    """Ao digitar um SKU na tela de novo anúncio, sugere título e faixa de
+    preço — primeiro olhando o próprio catálogo da empresa (se esse SKU já
+    foi cadastrado/importado antes), e senão buscando anúncios reais e
+    parecidos no catálogo público do Mercado Livre."""
+    sku = (sku or "").strip()
+    if not sku:
+        return {"found": False}
+
+    existing = await db.products.find_one({"user_id": user_id, "sku": sku})
+    if existing:
+        return {
+            "found": True,
+            "source": "own_catalog",
+            "title": existing.get("title", ""),
+            "description": existing.get("description", ""),
+            "price": existing.get("price"),
+        }
+
+    suggestion = ml_utils.suggest_from_sku(sku=sku, brand=brand)
+    if not suggestion.get("found"):
+        return {"found": False}
+
+    return {
+        "found": True,
+        "source": "mercado_livre_search",
+        "title": suggestion["suggested_title"],
+        "price_min": suggestion["price_min"],
+        "price_max": suggestion["price_max"],
+        "sample_count": suggestion["sample_count"],
+    }
+
+
 @api.get("/products/{product_id}", response_model=ProductOut)
 async def get_product(product_id: str, user_id: str = Depends(get_current_user_id)):
     doc = await db.products.find_one({"id": product_id, "user_id": user_id}, {"_id": 0})
@@ -682,8 +716,6 @@ async def import_sheet(file: UploadFile = File(...), user_id: str = Depends(get_
     return {"created": created, "errors": errors}
 
 
-
-
 # ============== External ERP Integration ==============
 @api.post("/integrations/erp/products")
 async def erp_ingest(products: List[ProductCreate], user_id: str = Depends(get_current_user_id)):
@@ -883,40 +915,6 @@ async def product_ai_suggest(product_id: str, user_id: str = Depends(get_current
         "template_filled": ai_result.get("template_filled", False),
         "ai_completed_fully": ai_result.get("ai_completed_fully", False),
         "web_search_used": ai_result.get("web_search_used", False),
-    }
-
-
-@api.get("/products/lookup-sku")
-async def lookup_sku(sku: str, brand: str = "", user_id: str = Depends(get_current_user_id)):
-    """Ao digitar um SKU na tela de novo anúncio, sugere título e faixa de
-    preço — primeiro olhando o próprio catálogo da empresa (se esse SKU já
-    foi cadastrado/importado antes), e senão buscando anúncios reais e
-    parecidos no catálogo público do Mercado Livre."""
-    sku = (sku or "").strip()
-    if not sku:
-        return {"found": False}
-
-    existing = await db.products.find_one({"user_id": user_id, "sku": sku})
-    if existing:
-        return {
-            "found": True,
-            "source": "own_catalog",
-            "title": existing.get("title", ""),
-            "description": existing.get("description", ""),
-            "price": existing.get("price"),
-        }
-
-    suggestion = ml_utils.suggest_from_sku(sku=sku, brand=brand)
-    if not suggestion.get("found"):
-        return {"found": False}
-
-    return {
-        "found": True,
-        "source": "mercado_livre_search",
-        "title": suggestion["suggested_title"],
-        "price_min": suggestion["price_min"],
-        "price_max": suggestion["price_max"],
-        "sample_count": suggestion["sample_count"],
     }
 
 
