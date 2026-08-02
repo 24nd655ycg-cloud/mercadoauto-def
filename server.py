@@ -25,7 +25,7 @@ import re
 
 from auth_utils import hash_password, verify_password, create_access_token, get_current_user_id
 from storage_utils import init_storage, put_object, get_object, APP_NAME, MIME_TYPES
-from ai_utils import generate_listing_content, generate_listing_from_template, DEFAULT_DESCRIPTION_TEMPLATE
+from ai_utils import generate_listing_content, generate_listing_from_template, DEFAULT_DESCRIPTION_TEMPLATE, ai_configured
 import ml_utils
 
 mongo_url = os.environ["MONGO_URL"]
@@ -840,6 +840,7 @@ async def product_ai_suggest(product_id: str, user_id: str = Depends(get_current
         "title": ai_result["title"],
         "description": ai_result["description"],
         "suggested_price": suggested_price,
+        "ai_used": ai_configured(),
     }
 
 
