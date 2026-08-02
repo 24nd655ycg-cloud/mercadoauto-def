@@ -66,6 +66,18 @@ class UserRegister(BaseDoc):
     email: str
     password: str
     company_name: str
+    trade_name: Optional[str] = None
+    cnpj: Optional[str] = None
+    phone: Optional[str] = None
+    state_registration: Optional[str] = None
+    tax_regime: Optional[str] = None
+    address_cep: Optional[str] = None
+    address_street: Optional[str] = None
+    address_number: Optional[str] = None
+    address_complement: Optional[str] = None
+    address_neighborhood: Optional[str] = None
+    address_city: Optional[str] = None
+    address_state: Optional[str] = None
 
     @field_validator("email")
     @classmethod
@@ -90,6 +102,16 @@ class UserRegister(BaseDoc):
             raise ValueError("Informe o nome da empresa")
         return v
 
+    @field_validator("cnpj")
+    @classmethod
+    def _v_cnpj(cls, v: Optional[str]) -> Optional[str]:
+        if v is None or not v.strip():
+            return None
+        digits = re.sub(r"\D", "", v)
+        if len(digits) != 14:
+            raise ValueError("CNPJ inválido (deve ter 14 dígitos)")
+        return digits
+
 
 class UserLogin(BaseDoc):
     email: str
@@ -105,6 +127,18 @@ class UserOut(BaseDoc):
     id: str
     email: str
     company_name: str
+    trade_name: Optional[str] = None
+    cnpj: Optional[str] = None
+    phone: Optional[str] = None
+    state_registration: Optional[str] = None
+    tax_regime: Optional[str] = None
+    address_cep: Optional[str] = None
+    address_street: Optional[str] = None
+    address_number: Optional[str] = None
+    address_complement: Optional[str] = None
+    address_neighborhood: Optional[str] = None
+    address_city: Optional[str] = None
+    address_state: Optional[str] = None
     ml_connected: bool = False
     ml_user_id: Optional[str] = None
     ml_nickname: Optional[str] = None
@@ -184,6 +218,18 @@ async def register(payload: UserRegister):
         "email": payload.email.lower(),
         "password_hash": hash_password(payload.password),
         "company_name": payload.company_name,
+        "trade_name": payload.trade_name,
+        "cnpj": payload.cnpj,
+        "phone": payload.phone,
+        "state_registration": payload.state_registration,
+        "tax_regime": payload.tax_regime,
+        "address_cep": payload.address_cep,
+        "address_street": payload.address_street,
+        "address_number": payload.address_number,
+        "address_complement": payload.address_complement,
+        "address_neighborhood": payload.address_neighborhood,
+        "address_city": payload.address_city,
+        "address_state": payload.address_state,
         "ml_connected": False,
         "ml_user_id": None,
         "ml_nickname": None,
@@ -220,6 +266,18 @@ def _user_public(doc: dict) -> dict:
         "id": doc["id"],
         "email": doc["email"],
         "company_name": doc["company_name"],
+        "trade_name": doc.get("trade_name"),
+        "cnpj": doc.get("cnpj"),
+        "phone": doc.get("phone"),
+        "state_registration": doc.get("state_registration"),
+        "tax_regime": doc.get("tax_regime"),
+        "address_cep": doc.get("address_cep"),
+        "address_street": doc.get("address_street"),
+        "address_number": doc.get("address_number"),
+        "address_complement": doc.get("address_complement"),
+        "address_neighborhood": doc.get("address_neighborhood"),
+        "address_city": doc.get("address_city"),
+        "address_state": doc.get("address_state"),
         "ml_connected": doc.get("ml_connected", False),
         "ml_user_id": doc.get("ml_user_id"),
         "ml_nickname": doc.get("ml_nickname"),
@@ -234,6 +292,36 @@ def _user_public(doc: dict) -> dict:
 class CompanySettingsIn(BaseDoc):
     company_name: Optional[str] = None
     description_template: Optional[str] = None
+    trade_name: Optional[str] = None
+    cnpj: Optional[str] = None
+    phone: Optional[str] = None
+    state_registration: Optional[str] = None
+    tax_regime: Optional[str] = None
+    address_cep: Optional[str] = None
+    address_street: Optional[str] = None
+    address_number: Optional[str] = None
+    address_complement: Optional[str] = None
+    address_neighborhood: Optional[str] = None
+    address_city: Optional[str] = None
+    address_state: Optional[str] = None
+
+    @field_validator("cnpj")
+    @classmethod
+    def _v_cnpj(cls, v: Optional[str]) -> Optional[str]:
+        if v is None or not v.strip():
+            return None
+        digits = re.sub(r"\D", "", v)
+        if len(digits) != 14:
+            raise ValueError("CNPJ inválido (deve ter 14 dígitos)")
+        return digits
+
+
+# Campos empresariais/fiscais que podem ser salvos como string vazia = "limpar"
+_COMPANY_TEXT_FIELDS = [
+    "trade_name", "phone", "state_registration", "tax_regime",
+    "address_cep", "address_street", "address_number", "address_complement",
+    "address_neighborhood", "address_city", "address_state",
+]
 
 
 @api.patch("/company/settings")
@@ -245,11 +333,38 @@ async def update_company_settings(payload: CompanySettingsIn, user_id: str = Dep
         # string vazia = empresa optou por remover o template próprio e
         # voltar a usar o modelo padrão
         updates["description_template"] = payload.description_template.strip() or None
+    if payload.cnpj is not None:
+        updates["cnpj"] = payload.cnpj
+    for field in _COMPANY_TEXT_FIELDS:
+        val = getattr(payload, field)
+        if val is not None:
+            updates[field] = val.strip() or None
     if not updates:
         raise HTTPException(status_code=400, detail="Nada para atualizar")
     await db.users.update_one({"id": user_id}, {"$set": updates})
     doc = await db.users.find_one({"id": user_id})
     return _user_public(doc)
+
+
+class ChangePasswordIn(BaseDoc):
+    current_password: str
+    new_password: str
+
+    @field_validator("new_password")
+    @classmethod
+    def _v_new_pwd(cls, v: str) -> str:
+        if not v or len(v) < 6:
+            raise ValueError("A nova senha precisa ter pelo menos 6 caracteres")
+        return v
+
+
+@api.post("/auth/change-password")
+async def change_password(payload: ChangePasswordIn, user_id: str = Depends(get_current_user_id)):
+    doc = await db.users.find_one({"id": user_id})
+    if not doc or not verify_password(payload.current_password, doc["password_hash"]):
+        raise HTTPException(status_code=401, detail="Senha atual incorreta")
+    await db.users.update_one({"id": user_id}, {"$set": {"password_hash": hash_password(payload.new_password)}})
+    return {"ok": True}
 
 
 @api.post("/uploads")
