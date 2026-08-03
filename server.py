@@ -115,16 +115,6 @@ class UserRegister(BaseDoc):
             raise ValueError("Informe o nome da empresa")
         return v
 
-    @field_validator("cnpj")
-    @classmethod
-    def _v_cnpj(cls, v: Optional[str]) -> Optional[str]:
-        if v is None or not v.strip():
-            return None
-        digits = re.sub(r"\D", "", v)
-        if len(digits) != 14:
-            raise ValueError("CNPJ inválido (deve ter 14 dígitos)")
-        return digits
-
 
 class UserLogin(BaseDoc):
     email: str
@@ -140,18 +130,6 @@ class UserOut(BaseDoc):
     id: str
     email: str
     company_name: str
-    trade_name: Optional[str] = None
-    cnpj: Optional[str] = None
-    phone: Optional[str] = None
-    state_registration: Optional[str] = None
-    tax_regime: Optional[str] = None
-    address_cep: Optional[str] = None
-    address_street: Optional[str] = None
-    address_number: Optional[str] = None
-    address_complement: Optional[str] = None
-    address_neighborhood: Optional[str] = None
-    address_city: Optional[str] = None
-    address_state: Optional[str] = None
     ml_connected: bool = False
     ml_user_id: Optional[str] = None
     ml_nickname: Optional[str] = None
@@ -305,18 +283,18 @@ def _user_public(doc: dict) -> dict:
         "id": doc["id"],
         "email": doc["email"],
         "company_name": doc["company_name"],
-        "trade_name": doc.get("trade_name"),
-        "cnpj": doc.get("cnpj"),
-        "phone": doc.get("phone"),
-        "state_registration": doc.get("state_registration"),
-        "tax_regime": doc.get("tax_regime"),
-        "address_cep": doc.get("address_cep"),
-        "address_street": doc.get("address_street"),
-        "address_number": doc.get("address_number"),
-        "address_complement": doc.get("address_complement"),
-        "address_neighborhood": doc.get("address_neighborhood"),
-        "address_city": doc.get("address_city"),
-        "address_state": doc.get("address_state"),
+        "trade_name": doc.get("trade_name") or "",
+        "cnpj": doc.get("cnpj") or "",
+        "phone": doc.get("phone") or "",
+        "state_registration": doc.get("state_registration") or "",
+        "tax_regime": doc.get("tax_regime") or "",
+        "address_cep": doc.get("address_cep") or "",
+        "address_street": doc.get("address_street") or "",
+        "address_number": doc.get("address_number") or "",
+        "address_complement": doc.get("address_complement") or "",
+        "address_neighborhood": doc.get("address_neighborhood") or "",
+        "address_city": doc.get("address_city") or "",
+        "address_state": doc.get("address_state") or "",
         "ml_connected": doc.get("ml_connected", False),
         "ml_user_id": doc.get("ml_user_id"),
         "ml_nickname": doc.get("ml_nickname"),
@@ -344,24 +322,6 @@ class CompanySettingsIn(BaseDoc):
     address_city: Optional[str] = None
     address_state: Optional[str] = None
 
-    @field_validator("cnpj")
-    @classmethod
-    def _v_cnpj(cls, v: Optional[str]) -> Optional[str]:
-        if v is None or not v.strip():
-            return None
-        digits = re.sub(r"\D", "", v)
-        if len(digits) != 14:
-            raise ValueError("CNPJ inválido (deve ter 14 dígitos)")
-        return digits
-
-
-# Campos empresariais/fiscais que podem ser salvos como string vazia = "limpar"
-_COMPANY_TEXT_FIELDS = [
-    "trade_name", "phone", "state_registration", "tax_regime",
-    "address_cep", "address_street", "address_number", "address_complement",
-    "address_neighborhood", "address_city", "address_state",
-]
-
 
 @api.patch("/company/settings")
 async def update_company_settings(payload: CompanySettingsIn, user_id: str = Depends(get_current_user_id)):
@@ -372,38 +332,19 @@ async def update_company_settings(payload: CompanySettingsIn, user_id: str = Dep
         # string vazia = empresa optou por remover o template próprio e
         # voltar a usar o modelo padrão
         updates["description_template"] = payload.description_template.strip() or None
-    if payload.cnpj is not None:
-        updates["cnpj"] = payload.cnpj
-    for field in _COMPANY_TEXT_FIELDS:
-        val = getattr(payload, field)
-        if val is not None:
-            updates[field] = val.strip() or None
+    for field in (
+        "trade_name", "cnpj", "phone", "state_registration", "tax_regime",
+        "address_cep", "address_street", "address_number", "address_complement",
+        "address_neighborhood", "address_city", "address_state",
+    ):
+        value = getattr(payload, field)
+        if value is not None:
+            updates[field] = value.strip()
     if not updates:
         raise HTTPException(status_code=400, detail="Nada para atualizar")
     await db.users.update_one({"id": user_id}, {"$set": updates})
     doc = await db.users.find_one({"id": user_id})
     return _user_public(doc)
-
-
-class ChangePasswordIn(BaseDoc):
-    current_password: str
-    new_password: str
-
-    @field_validator("new_password")
-    @classmethod
-    def _v_new_pwd(cls, v: str) -> str:
-        if not v or len(v) < 6:
-            raise ValueError("A nova senha precisa ter pelo menos 6 caracteres")
-        return v
-
-
-@api.post("/auth/change-password")
-async def change_password(payload: ChangePasswordIn, user_id: str = Depends(get_current_user_id)):
-    doc = await db.users.find_one({"id": user_id})
-    if not doc or not verify_password(payload.current_password, doc["password_hash"]):
-        raise HTTPException(status_code=401, detail="Senha atual incorreta")
-    await db.users.update_one({"id": user_id}, {"$set": {"password_hash": hash_password(payload.new_password)}})
-    return {"ok": True}
 
 
 @api.post("/uploads")
@@ -517,40 +458,6 @@ async def list_products(
     return [_product_public(d) for d in docs]
 
 
-@api.get("/products/lookup-sku")
-async def lookup_sku(sku: str, brand: str = "", user_id: str = Depends(get_current_user_id)):
-    """Ao digitar um SKU na tela de novo anúncio, sugere título e faixa de
-    preço — primeiro olhando o próprio catálogo da empresa (se esse SKU já
-    foi cadastrado/importado antes), e senão buscando anúncios reais e
-    parecidos no catálogo público do Mercado Livre."""
-    sku = (sku or "").strip()
-    if not sku:
-        return {"found": False}
-
-    existing = await db.products.find_one({"user_id": user_id, "sku": sku})
-    if existing:
-        return {
-            "found": True,
-            "source": "own_catalog",
-            "title": existing.get("title", ""),
-            "description": existing.get("description", ""),
-            "price": existing.get("price"),
-        }
-
-    suggestion = ml_utils.suggest_from_sku(sku=sku, brand=brand)
-    if not suggestion.get("found"):
-        return {"found": False}
-
-    return {
-        "found": True,
-        "source": "mercado_livre_search",
-        "title": suggestion["suggested_title"],
-        "price_min": suggestion["price_min"],
-        "price_max": suggestion["price_max"],
-        "sample_count": suggestion["sample_count"],
-    }
-
-
 @api.get("/products/{product_id}", response_model=ProductOut)
 async def get_product(product_id: str, user_id: str = Depends(get_current_user_id)):
     doc = await db.products.find_one({"id": product_id, "user_id": user_id}, {"_id": 0})
@@ -614,10 +521,23 @@ async def publish_product(product_id: str, user_id: str = Depends(get_current_us
 
     # Real ML publish path
     if ml_utils.is_configured(user) and user and user.get("ml_access_token"):
+        # O Mercado Livre exige pelo menos uma foto para publicar a maioria
+        # dos anúncios — melhor avisar isso claramente do que deixar a API
+        # do ML rejeitar com uma mensagem confusa depois.
+        if not doc.get("external_image_urls"):
+            raise HTTPException(
+                status_code=400,
+                detail="Este produto não tem nenhuma imagem cadastrada. O Mercado Livre exige ao menos uma foto para publicar — adicione uma URL de imagem antes de tentar de novo.",
+            )
         try:
+            # A categoria salva no produto (vinda de planilha/ERP, ex:
+            # "GERAL", "BOMBA OLEO") é texto livre da empresa, não um
+            # category_id de verdade do Mercado Livre — por isso a
+            # categoria real é descoberta a partir do título do anúncio.
+            category_id = ml_utils.predict_category(title) or "MLB1055"
             item_payload = {
                 "title": title[:60],
-                "category_id": doc.get("category") or "MLB1055",
+                "category_id": category_id,
                 "price": doc["price"],
                 "currency_id": "BRL",
                 "available_quantity": doc["quantity"],
@@ -867,6 +787,8 @@ async def import_sheet(file: UploadFile = File(...), user_id: str = Depends(get_
     return {"created": created, "errors": errors}
 
 
+
+
 # ============== External ERP Integration ==============
 @api.post("/integrations/erp/products")
 async def erp_ingest(products: List[ProductCreate], user_id: str = Depends(get_current_user_id)):
@@ -1066,6 +988,40 @@ async def product_ai_suggest(product_id: str, user_id: str = Depends(get_current
         "template_filled": ai_result.get("template_filled", False),
         "ai_completed_fully": ai_result.get("ai_completed_fully", False),
         "web_search_used": ai_result.get("web_search_used", False),
+    }
+
+
+@api.get("/products/lookup-sku")
+async def lookup_sku(sku: str, brand: str = "", user_id: str = Depends(get_current_user_id)):
+    """Ao digitar um SKU na tela de novo anúncio, sugere título e faixa de
+    preço — primeiro olhando o próprio catálogo da empresa (se esse SKU já
+    foi cadastrado/importado antes), e senão buscando anúncios reais e
+    parecidos no catálogo público do Mercado Livre."""
+    sku = (sku or "").strip()
+    if not sku:
+        return {"found": False}
+
+    existing = await db.products.find_one({"user_id": user_id, "sku": sku})
+    if existing:
+        return {
+            "found": True,
+            "source": "own_catalog",
+            "title": existing.get("title", ""),
+            "description": existing.get("description", ""),
+            "price": existing.get("price"),
+        }
+
+    suggestion = ml_utils.suggest_from_sku(sku=sku, brand=brand)
+    if not suggestion.get("found"):
+        return {"found": False}
+
+    return {
+        "found": True,
+        "source": "mercado_livre_search",
+        "title": suggestion["suggested_title"],
+        "price_min": suggestion["price_min"],
+        "price_max": suggestion["price_max"],
+        "sample_count": suggestion["sample_count"],
     }
 
 

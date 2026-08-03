@@ -102,8 +102,37 @@ def publish_item(access_token: str, item: dict) -> dict:
         json=item,
         timeout=60,
     )
-    resp.raise_for_status()
+    if not resp.ok:
+        # A exceção padrão do requests não inclui o corpo da resposta —
+        # que é onde o Mercado Livre explica o motivo real da rejeição
+        # (ex: categoria inválida, falta de fotos, atributo obrigatório
+        # ausente). Sem isso, o erro mostrado ao usuário é inútil.
+        try:
+            detail = resp.json()
+        except ValueError:
+            detail = resp.text
+        raise ValueError(f"Mercado Livre recusou o anúncio ({resp.status_code}): {detail}")
     return resp.json()
+
+
+def predict_category(title: str, site_id: str = "MLB") -> str | None:
+    """Descobre a categoria real do Mercado Livre a partir do título do
+    produto, usando a API pública de sugestão de categoria — em vez de usar
+    texto livre (ex: 'GERAL', vindo de uma planilha de ERP) como se fosse
+    um category_id de verdade, o que o Mercado Livre sempre rejeitaria."""
+    try:
+        resp = requests.get(
+            f"{ML_API_BASE}/sites/{site_id}/domain_discovery/search",
+            params={"q": title[:100], "limit": 1},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        if data and isinstance(data, list) and data[0].get("category_id"):
+            return data[0]["category_id"]
+    except Exception as e:
+        logger.error(f"Previsão de categoria falhou para '{title}': {e}")
+    return None
 
 
 def update_item(access_token: str, ml_item_id: str, changes: dict) -> dict:
