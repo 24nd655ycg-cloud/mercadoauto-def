@@ -43,6 +43,22 @@ mongo_url = os.environ["MONGO_URL"]
 client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ["DB_NAME"]]
 
+# URL pública desse próprio backend — usada para montar links de foto que o
+# Mercado Livre (um servidor externo) consegue baixar.
+PUBLIC_BACKEND_URL = (os.environ.get("PUBLIC_BACKEND_URL") or "https://mercadoauto-def-production.up.railway.app").rstrip("/")
+
+
+def _extract_youtube_id(video_url: Optional[str]) -> Optional[str]:
+    """Extrai o ID do vídeo a partir de uma URL do YouTube, em qualquer um
+    dos formatos comuns (youtube.com/watch?v=, youtu.be/, /shorts/,
+    /embed/). Retorna None se não for reconhecido como YouTube — nunca
+    lança exceção, para nunca quebrar a publicação de um anúncio por causa
+    de um link de vídeo mal formatado."""
+    if not video_url:
+        return None
+    m = re.search(r"(?:youtube\.com/(?:watch\?v=|shorts/|embed/)|youtu\.be/)([A-Za-z0-9_-]{6,})", video_url)
+    return m.group(1) if m else None
+
 app = FastAPI(title="MercadoAuto API")
 api = APIRouter(prefix="/api")
 
@@ -146,6 +162,7 @@ class ProductCreate(BaseDoc):
     condition: str = "new"  # new | used
     image_ids: List[str] = []
     external_image_urls: List[str] = []
+    video_url: Optional[str] = None
     use_ai: bool = True
 
 
@@ -159,6 +176,7 @@ class ProductUpdate(BaseDoc):
     condition: Optional[str] = None
     image_ids: Optional[List[str]] = None
     external_image_urls: Optional[List[str]] = None
+    video_url: Optional[str] = None
 
 
 class ProductOut(BaseDoc):
@@ -175,6 +193,8 @@ class ProductOut(BaseDoc):
     condition: str
     image_ids: List[str] = []
     external_image_urls: List[str] = []
+    video_url: Optional[str] = None
+    ml_thumbnail: Optional[str] = None
     status: str  # draft | published | error
     ml_id: Optional[str] = None
     ml_permalink: Optional[str] = None
@@ -322,6 +342,24 @@ class CompanySettingsIn(BaseDoc):
     address_city: Optional[str] = None
     address_state: Optional[str] = None
 
+    @field_validator("cnpj")
+    @classmethod
+    def _v_cnpj(cls, v: Optional[str]) -> Optional[str]:
+        if v is None or not v.strip():
+            return None
+        digits = re.sub(r"\D", "", v)
+        if len(digits) != 14:
+            raise ValueError("CNPJ inválido (deve ter 14 dígitos)")
+        return digits
+
+
+# Campos empresariais/fiscais que podem ser salvos como string vazia = "limpar"
+_COMPANY_TEXT_FIELDS = [
+    "trade_name", "phone", "state_registration", "tax_regime",
+    "address_cep", "address_street", "address_number", "address_complement",
+    "address_neighborhood", "address_city", "address_state",
+]
+
 
 @api.patch("/company/settings")
 async def update_company_settings(payload: CompanySettingsIn, user_id: str = Depends(get_current_user_id)):
@@ -332,14 +370,12 @@ async def update_company_settings(payload: CompanySettingsIn, user_id: str = Dep
         # string vazia = empresa optou por remover o template próprio e
         # voltar a usar o modelo padrão
         updates["description_template"] = payload.description_template.strip() or None
-    for field in (
-        "trade_name", "cnpj", "phone", "state_registration", "tax_regime",
-        "address_cep", "address_street", "address_number", "address_complement",
-        "address_neighborhood", "address_city", "address_state",
-    ):
-        value = getattr(payload, field)
-        if value is not None:
-            updates[field] = value.strip()
+    if payload.cnpj is not None:
+        updates["cnpj"] = payload.cnpj
+    for field in _COMPANY_TEXT_FIELDS:
+        val = getattr(payload, field)
+        if val is not None:
+            updates[field] = val.strip() or None
     if not updates:
         raise HTTPException(status_code=400, detail="Nada para atualizar")
     await db.users.update_one({"id": user_id}, {"$set": updates})
@@ -357,7 +393,7 @@ async def upload_image(file: UploadFile = File(...), user_id: str = Depends(get_
     data = await file.read()
     content_type = file.content_type or MIME_TYPES[ext]
     try:
-        result = put_object(path, data, content_type)
+        result = await put_object(path, data, content_type)
     except Exception as e:
         logger.error(f"upload failed: {e}")
         raise HTTPException(status_code=500, detail="Falha ao enviar arquivo")
@@ -391,7 +427,34 @@ async def get_file(file_id: str, auth: Optional[str] = Query(None), authorizatio
     record = await db.files.find_one({"id": file_id, "user_id": user_id, "is_deleted": False})
     if not record:
         raise HTTPException(status_code=404, detail="Arquivo não encontrado")
-    data, content_type = get_object(record["storage_path"])
+    try:
+        data, content_type = await get_object(record["storage_path"])
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Arquivo não encontrado no storage")
+    return Response(content=data, media_type=record.get("content_type", content_type))
+
+
+@api.get("/public/files/{file_id}")
+async def get_public_file(file_id: str):
+    """Serve uma foto de produto sem exigir login. Necessário para: (1) o
+    Mercado Livre conseguir baixar a imagem ao publicar um anúncio (o token
+    de autenticação do MercadoAuto não existe do lado do Mercado Livre), e
+    (2) exibir a miniatura do produto na tela de Anúncios sem precisar
+    anexar o Bearer token em cada <img>. Só serve arquivos com content-type
+    de imagem — nunca planilhas ou outros documentos enviados pela empresa —
+    e essas fotos já são, por natureza, destinadas a ficarem públicas em um
+    anúncio no maior marketplace do Brasil, então isso não expõe nenhum
+    dado sensível da empresa."""
+    record = await db.files.find_one({"id": file_id, "is_deleted": False})
+    if not record:
+        raise HTTPException(status_code=404, detail="Arquivo não encontrado")
+    content_type = record.get("content_type", "")
+    if not content_type.startswith("image/"):
+        raise HTTPException(status_code=404, detail="Arquivo não encontrado")
+    try:
+        data, content_type = await get_object(record["storage_path"])
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Arquivo não encontrado no storage")
     return Response(content=data, media_type=record.get("content_type", content_type))
 
 
@@ -428,6 +491,7 @@ async def create_product(payload: ProductCreate, user_id: str = Depends(get_curr
         "condition": payload.condition,
         "image_ids": payload.image_ids,
         "external_image_urls": payload.external_image_urls,
+        "video_url": payload.video_url,
         "status": "draft",
         "ml_id": None,
         "ml_permalink": None,
@@ -521,13 +585,22 @@ async def publish_product(product_id: str, user_id: str = Depends(get_current_us
 
     # Real ML publish path
     if ml_utils.is_configured(user) and user and user.get("ml_access_token"):
+        # Fotos vêm de duas origens: enviadas direto pelo upload da empresa
+        # (image_ids, guardadas no nosso storage) ou coladas como URL
+        # externa (external_image_urls). O Mercado Livre precisa de uma URL
+        # publicamente acessível para baixar cada foto — por isso as
+        # image_ids são convertidas para a URL pública do MercadoAuto.
+        picture_urls = list(doc.get("external_image_urls") or [])
+        for file_id in (doc.get("image_ids") or []):
+            picture_urls.append(f"{PUBLIC_BACKEND_URL}/api/public/files/{file_id}")
+
         # O Mercado Livre exige pelo menos uma foto para publicar a maioria
         # dos anúncios — melhor avisar isso claramente do que deixar a API
         # do ML rejeitar com uma mensagem confusa depois.
-        if not doc.get("external_image_urls"):
+        if not picture_urls:
             raise HTTPException(
                 status_code=400,
-                detail="Este produto não tem nenhuma imagem cadastrada. O Mercado Livre exige ao menos uma foto para publicar — adicione uma URL de imagem antes de tentar de novo.",
+                detail="Este produto não tem nenhuma imagem cadastrada. O Mercado Livre exige ao menos uma foto para publicar — adicione uma foto antes de tentar de novo.",
             )
         try:
             # A categoria salva no produto (vinda de planilha/ERP, ex:
@@ -545,8 +618,15 @@ async def publish_product(product_id: str, user_id: str = Depends(get_current_us
                 "listing_type_id": "gold_special",
                 "condition": doc.get("condition", "new"),
                 "description": {"plain_text": doc.get("ai_description") or doc.get("description", "")},
-                "pictures": [{"source": u} for u in doc.get("external_image_urls", [])],
+                "pictures": [{"source": u} for u in picture_urls],
             }
+            # Vídeo é opcional — o Mercado Livre só aceita vídeos hospedados
+            # no YouTube, referenciados pelo ID do vídeo. Se o link não for
+            # reconhecido como YouTube, simplesmente não anexamos vídeo (não
+            # deixamos isso quebrar a publicação do anúncio).
+            youtube_id = _extract_youtube_id(doc.get("video_url"))
+            if youtube_id:
+                item_payload["videos"] = [{"id": youtube_id}]
             resp = ml_utils.publish_item(user["ml_access_token"], item_payload)
             updates = {
                 "status": "published",
@@ -602,6 +682,8 @@ def _product_public(doc: dict) -> dict:
         "condition": doc.get("condition", "new"),
         "image_ids": doc.get("image_ids", []),
         "external_image_urls": doc.get("external_image_urls", []),
+        "video_url": doc.get("video_url"),
+        "ml_thumbnail": doc.get("ml_thumbnail"),
         "status": doc.get("status", "draft"),
         "ml_id": doc.get("ml_id"),
         "ml_permalink": doc.get("ml_permalink"),
@@ -811,6 +893,7 @@ async def erp_ingest(products: List[ProductCreate], user_id: str = Depends(get_c
             "condition": p.condition,
             "image_ids": p.image_ids,
             "external_image_urls": p.external_image_urls,
+            "video_url": p.video_url,
             "status": "draft",
             "ml_id": None,
             "ml_permalink": None,
