@@ -26,7 +26,17 @@ import re
 
 from auth_utils import hash_password, verify_password, create_access_token, get_current_user_id
 from storage_utils import init_storage, put_object, get_object, APP_NAME, MIME_TYPES
-from ai_utils import generate_listing_content, generate_listing_from_template, DEFAULT_DESCRIPTION_TEMPLATE, ai_configured
+from ai_utils import (
+    generate_listing_content,
+    generate_listing_from_template,
+    DEFAULT_DESCRIPTION_TEMPLATE,
+    ai_configured,
+    AI_PROVIDER,
+    ANTHROPIC_API_KEY,
+    OPENAI_API_KEY,
+    ANTHROPIC_MODEL,
+    OPENAI_MODEL,
+)
 import ml_utils
 
 mongo_url = os.environ["MONGO_URL"]
@@ -66,6 +76,21 @@ class UserRegister(BaseDoc):
     email: str
     password: str
     company_name: str
+    # Dados fiscais/endereço — todos opcionais, coletados no cadastro em 2
+    # etapas do front-end (usados hoje só para exibir/editar depois; a
+    # emissão de nota fiscal em si ainda não está implementada).
+    trade_name: Optional[str] = None
+    cnpj: Optional[str] = None
+    phone: Optional[str] = None
+    state_registration: Optional[str] = None
+    tax_regime: Optional[str] = None
+    address_cep: Optional[str] = None
+    address_street: Optional[str] = None
+    address_number: Optional[str] = None
+    address_complement: Optional[str] = None
+    address_neighborhood: Optional[str] = None
+    address_city: Optional[str] = None
+    address_state: Optional[str] = None
 
     @field_validator("email")
     @classmethod
@@ -184,6 +209,18 @@ async def register(payload: UserRegister):
         "email": payload.email.lower(),
         "password_hash": hash_password(payload.password),
         "company_name": payload.company_name,
+        "trade_name": payload.trade_name,
+        "cnpj": payload.cnpj,
+        "phone": payload.phone,
+        "state_registration": payload.state_registration,
+        "tax_regime": payload.tax_regime,
+        "address_cep": payload.address_cep,
+        "address_street": payload.address_street,
+        "address_number": payload.address_number,
+        "address_complement": payload.address_complement,
+        "address_neighborhood": payload.address_neighborhood,
+        "address_city": payload.address_city,
+        "address_state": payload.address_state,
         "ml_connected": False,
         "ml_user_id": None,
         "ml_nickname": None,
@@ -215,11 +252,49 @@ async def me(user_id: str = Depends(get_current_user_id)):
     return _user_public(doc)
 
 
+class ChangePasswordIn(BaseDoc):
+    current_password: str
+    new_password: str
+
+    @field_validator("new_password")
+    @classmethod
+    def _v_new_pwd(cls, v: str) -> str:
+        if len(v or "") < 6:
+            raise ValueError("A nova senha precisa ter 6 ou mais caracteres")
+        return v
+
+
+@api.post("/auth/change-password")
+async def change_password(payload: ChangePasswordIn, user_id: str = Depends(get_current_user_id)):
+    doc = await db.users.find_one({"id": user_id})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Usuário não encontrado")
+    if not verify_password(payload.current_password, doc["password_hash"]):
+        raise HTTPException(status_code=400, detail="Senha atual incorreta")
+    await db.users.update_one(
+        {"id": user_id},
+        {"$set": {"password_hash": hash_password(payload.new_password)}},
+    )
+    return {"ok": True}
+
+
 def _user_public(doc: dict) -> dict:
     return {
         "id": doc["id"],
         "email": doc["email"],
         "company_name": doc["company_name"],
+        "trade_name": doc.get("trade_name") or "",
+        "cnpj": doc.get("cnpj") or "",
+        "phone": doc.get("phone") or "",
+        "state_registration": doc.get("state_registration") or "",
+        "tax_regime": doc.get("tax_regime") or "",
+        "address_cep": doc.get("address_cep") or "",
+        "address_street": doc.get("address_street") or "",
+        "address_number": doc.get("address_number") or "",
+        "address_complement": doc.get("address_complement") or "",
+        "address_neighborhood": doc.get("address_neighborhood") or "",
+        "address_city": doc.get("address_city") or "",
+        "address_state": doc.get("address_state") or "",
         "ml_connected": doc.get("ml_connected", False),
         "ml_user_id": doc.get("ml_user_id"),
         "ml_nickname": doc.get("ml_nickname"),
@@ -234,6 +309,18 @@ def _user_public(doc: dict) -> dict:
 class CompanySettingsIn(BaseDoc):
     company_name: Optional[str] = None
     description_template: Optional[str] = None
+    trade_name: Optional[str] = None
+    cnpj: Optional[str] = None
+    phone: Optional[str] = None
+    state_registration: Optional[str] = None
+    tax_regime: Optional[str] = None
+    address_cep: Optional[str] = None
+    address_street: Optional[str] = None
+    address_number: Optional[str] = None
+    address_complement: Optional[str] = None
+    address_neighborhood: Optional[str] = None
+    address_city: Optional[str] = None
+    address_state: Optional[str] = None
 
 
 @api.patch("/company/settings")
@@ -245,6 +332,14 @@ async def update_company_settings(payload: CompanySettingsIn, user_id: str = Dep
         # string vazia = empresa optou por remover o template próprio e
         # voltar a usar o modelo padrão
         updates["description_template"] = payload.description_template.strip() or None
+    for field in (
+        "trade_name", "cnpj", "phone", "state_registration", "tax_regime",
+        "address_cep", "address_street", "address_number", "address_complement",
+        "address_neighborhood", "address_city", "address_state",
+    ):
+        value = getattr(payload, field)
+        if value is not None:
+            updates[field] = value.strip()
     if not updates:
         raise HTTPException(status_code=400, detail="Nada para atualizar")
     await db.users.update_one({"id": user_id}, {"$set": updates})
@@ -262,7 +357,7 @@ async def upload_image(file: UploadFile = File(...), user_id: str = Depends(get_
     data = await file.read()
     content_type = file.content_type or MIME_TYPES[ext]
     try:
-        result = await put_object(path, data, content_type)
+        result = put_object(path, data, content_type)
     except Exception as e:
         logger.error(f"upload failed: {e}")
         raise HTTPException(status_code=500, detail="Falha ao enviar arquivo")
@@ -296,10 +391,7 @@ async def get_file(file_id: str, auth: Optional[str] = Query(None), authorizatio
     record = await db.files.find_one({"id": file_id, "user_id": user_id, "is_deleted": False})
     if not record:
         raise HTTPException(status_code=404, detail="Arquivo não encontrado")
-    try:
-        data, content_type = await get_object(record["storage_path"])
-    except FileNotFoundError:
-        raise HTTPException(status_code=404, detail="Arquivo não encontrado no storage")
+    data, content_type = get_object(record["storage_path"])
     return Response(content=data, media_type=record.get("content_type", content_type))
 
 
@@ -940,6 +1032,22 @@ async def stats(user_id: str = Depends(get_current_user_id)):
 @api.get("/")
 async def root():
     return {"service": "MercadoAuto API", "status": "ok"}
+
+
+@api.get("/ai-status")
+async def ai_status():
+    """Diagnóstico público (sem dado sensível): mostra qual provedor de IA
+    está ativo agora (AI_PROVIDER) e se a chave correspondente está
+    configurada — sem nunca expor a chave em si. Use para confirmar qual
+    IA está realmente sendo usada, sem depender de nenhum teste externo."""
+    return {
+        "provider_configured": AI_PROVIDER,
+        "provider_ready": ai_configured(),
+        "anthropic_key_present": bool(ANTHROPIC_API_KEY),
+        "openai_key_present": bool(OPENAI_API_KEY),
+        "anthropic_model": ANTHROPIC_MODEL,
+        "openai_model": OPENAI_MODEL,
+    }
 
 
 app.include_router(api)
