@@ -229,6 +229,80 @@ class MLConfigIn(BaseDoc):
     ml_redirect_uri: str
 
 
+class ErpConnectionIn(BaseDoc):
+    name: str
+    environment: str = "Produção"
+    base_url: str = ""
+    api_key: str = ""
+    sync: str = "Em tempo real (webhook)"
+    active: bool = True
+
+
+class ErpConnectionUpdate(BaseDoc):
+    name: Optional[str] = None
+    environment: Optional[str] = None
+    base_url: Optional[str] = None
+    api_key: Optional[str] = None
+    sync: Optional[str] = None
+    active: Optional[bool] = None
+
+
+def _erp_conn_public(doc: dict) -> dict:
+    return {
+        "id": doc["id"],
+        "name": doc.get("name", ""),
+        "environment": doc.get("environment", "Produção"),
+        "base_url": doc.get("base_url", ""),
+        "has_api_key": bool(doc.get("api_key")),
+        "sync": doc.get("sync", "Em tempo real (webhook)"),
+        "active": doc.get("active", True),
+        "created_at": doc.get("created_at", ""),
+    }
+
+
+@api.post("/erp-connections")
+async def create_erp_connection(payload: ErpConnectionIn, user_id: str = Depends(get_current_user_id)):
+    doc = {
+        "id": str(uuid.uuid4()),
+        "user_id": user_id,
+        "name": payload.name.strip(),
+        "environment": payload.environment,
+        "base_url": payload.base_url.strip(),
+        "api_key": payload.api_key.strip(),
+        "sync": payload.sync,
+        "active": payload.active,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    await db.erp_connections.insert_one(doc)
+    return _erp_conn_public(doc)
+
+
+@api.get("/erp-connections")
+async def list_erp_connections(user_id: str = Depends(get_current_user_id)):
+    docs = await db.erp_connections.find({"user_id": user_id}, {"_id": 0}).sort("created_at", -1).to_list(200)
+    return [_erp_conn_public(d) for d in docs]
+
+
+@api.patch("/erp-connections/{conn_id}")
+async def update_erp_connection(conn_id: str, payload: ErpConnectionUpdate, user_id: str = Depends(get_current_user_id)):
+    doc = await db.erp_connections.find_one({"id": conn_id, "user_id": user_id})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Integração não encontrada")
+    updates = {k: v for k, v in payload.model_dump(exclude_unset=True).items() if v is not None}
+    if updates:
+        await db.erp_connections.update_one({"id": conn_id}, {"$set": updates})
+        doc.update(updates)
+    return _erp_conn_public(doc)
+
+
+@api.delete("/erp-connections/{conn_id}")
+async def delete_erp_connection(conn_id: str, user_id: str = Depends(get_current_user_id)):
+    res = await db.erp_connections.delete_one({"id": conn_id, "user_id": user_id})
+    if res.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Integração não encontrada")
+    return {"ok": True}
+
+
 # ============== Auth ==============
 @api.post("/auth/register")
 async def register(payload: UserRegister):
@@ -332,6 +406,11 @@ def _user_public(doc: dict) -> dict:
         "ml_redirect_uri": doc.get("ml_redirect_uri") or "",
         "ml_has_secret": bool(doc.get("ml_client_secret")),
         "description_template": doc.get("description_template"),
+        "logo_file_id": doc.get("logo_file_id"),
+        "palette_accent": doc.get("palette_accent"),
+        "palette_accent_text": doc.get("palette_accent_text"),
+        "palette_bg": doc.get("palette_bg"),
+        "palette_accent2": doc.get("palette_accent2"),
     }
 
 
@@ -351,6 +430,11 @@ class CompanySettingsIn(BaseDoc):
     address_neighborhood: Optional[str] = None
     address_city: Optional[str] = None
     address_state: Optional[str] = None
+    logo_file_id: Optional[str] = None
+    palette_accent: Optional[str] = None
+    palette_accent_text: Optional[str] = None
+    palette_bg: Optional[str] = None
+    palette_accent2: Optional[str] = None
 
     @field_validator("cnpj")
     @classmethod
@@ -368,6 +452,7 @@ _COMPANY_TEXT_FIELDS = [
     "trade_name", "phone", "state_registration", "tax_regime",
     "address_cep", "address_street", "address_number", "address_complement",
     "address_neighborhood", "address_city", "address_state",
+    "logo_file_id", "palette_accent", "palette_accent_text", "palette_bg", "palette_accent2",
 ]
 
 
