@@ -503,7 +503,13 @@ async def upload_image(file: UploadFile = File(...), user_id: str = Depends(get_
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
     await db.files.insert_one(doc)
-    return {"id": file_id, "url": f"/api/files/{file_id}", "size": doc["size"]}
+    # Imagens usam o endpoint público (sem exigir token) — é o que permite a
+    # pré-visualização aparecer na hora, logo após o upload, dentro de uma
+    # <img> comum (que não consegue mandar Authorization header). Outros
+    # tipos de arquivo continuam no endpoint autenticado.
+    public = content_type.startswith("image/")
+    url = f"/api/public/files/{file_id}" if public else f"/api/files/{file_id}"
+    return {"id": file_id, "url": url, "size": doc["size"]}
 
 
 @api.get("/files/{file_id}")
@@ -934,30 +940,41 @@ async def import_sheet(file: UploadFile = File(...), user_id: str = Depends(get_
 
             image_urls = str(_get("images", "")).strip()
             urls = [u.strip() for u in image_urls.split("|") if u.strip()] if image_urls else []
-            doc = {
-                "id": str(uuid.uuid4()),
-                "user_id": user_id,
-                "sku": _clean_text(_get("sku")),
+            sku = _clean_text(_get("sku"))
+            fields = {
                 "title": _clean_text(_get("title")),
-                "ai_title": None,
                 "description": _clean_text(_get("description", "")),
-                "ai_description": None,
                 "price": _parse_number(_get("price", 0)),
                 "quantity": int(_parse_number(_get("quantity", 1), default=1)),
                 "brand": _clean_text(_get("brand", "")),
                 "category": _clean_text(_get("category", "")),
                 "condition": _clean_text(_get("condition", "new")) or "new",
-                "image_ids": [],
                 "external_image_urls": urls,
-                "status": "draft",
-                "ml_id": None,
-                "ml_permalink": None,
-                "ml_mock": False,
-                "error_message": None,
-                "created_at": now,
                 "updated_at": now,
             }
-            await db.products.insert_one(doc)
+            # Reimportar a mesma planilha (ex: preço/estoque atualizado) é um
+            # fluxo comum — sem checar o SKU aqui, cada reimportação duplicava
+            # os mesmos produtos em vez de atualizar os que já existem.
+            existing = await db.products.find_one({"user_id": user_id, "sku": sku})
+            if existing:
+                await db.products.update_one({"id": existing["id"]}, {"$set": fields})
+            else:
+                doc = {
+                    "id": str(uuid.uuid4()),
+                    "user_id": user_id,
+                    "sku": sku,
+                    "ai_title": None,
+                    "ai_description": None,
+                    "image_ids": [],
+                    "status": "draft",
+                    "ml_id": None,
+                    "ml_permalink": None,
+                    "ml_mock": False,
+                    "error_message": None,
+                    "created_at": now,
+                    **fields,
+                }
+                await db.products.insert_one(doc)
             created += 1
         except Exception as e:
             errors.append({"row": int(idx) + 2, "error": str(e)})
