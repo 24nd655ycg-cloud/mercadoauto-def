@@ -84,6 +84,20 @@ async def _validation_handler(request, exc: RequestValidationError):
 EMAIL_REGEX = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
+def _validate_password_strength(v: str) -> str:
+    """Regra de senha forte: pelo menos 8 caracteres, com ao menos uma
+    letra e um número. Usada tanto no cadastro quanto na troca de senha,
+    para manter a mesma exigência nos dois lugares."""
+    v = v or ""
+    if len(v) < 8:
+        raise ValueError("A senha precisa ter pelo menos 8 caracteres")
+    if not re.search(r"[A-Za-z]", v):
+        raise ValueError("A senha precisa ter pelo menos uma letra")
+    if not re.search(r"\d", v):
+        raise ValueError("A senha precisa ter pelo menos um número")
+    return v
+
+
 class BaseDoc(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
@@ -119,9 +133,7 @@ class UserRegister(BaseDoc):
     @field_validator("password")
     @classmethod
     def _v_pwd(cls, v: str) -> str:
-        if not v or len(v) < 6:
-            raise ValueError("A senha precisa ter pelo menos 6 caracteres")
-        return v
+        return _validate_password_strength(v)
 
     @field_validator("company_name")
     @classmethod
@@ -279,9 +291,7 @@ class ChangePasswordIn(BaseDoc):
     @field_validator("new_password")
     @classmethod
     def _v_new_pwd(cls, v: str) -> str:
-        if len(v or "") < 6:
-            raise ValueError("A nova senha precisa ter 6 ou mais caracteres")
-        return v
+        return _validate_password_strength(v)
 
 
 @api.post("/auth/change-password")
