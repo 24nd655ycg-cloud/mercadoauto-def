@@ -491,7 +491,7 @@ async def upload_image(file: UploadFile = File(...), user_id: str = Depends(get_
         result = await put_object(path, data, content_type)
     except Exception as e:
         logger.error(f"upload failed: {e}")
-        raise HTTPException(status_code=500, detail="Falha ao enviar arquivo")
+        raise HTTPException(status_code=500, detail=f"Falha ao enviar arquivo: {e}")
     doc = {
         "id": file_id,
         "user_id": user_id,
@@ -1272,7 +1272,7 @@ app.add_middleware(
 @app.on_event("startup")
 async def startup():
     try:
-        init_storage()
+        await init_storage()
     except Exception as e:
         logger.warning(f"Storage init deferred: {e}")
 
