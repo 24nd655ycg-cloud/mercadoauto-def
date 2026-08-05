@@ -768,6 +768,7 @@ async def publish_product(product_id: str, user_id: str = Depends(get_current_us
             # category_id de verdade do Mercado Livre — por isso a
             # categoria real é descoberta a partir do título do anúncio.
             category_id = ml_utils.predict_category(title) or "MLB1055"
+            required_attributes = ml_utils.build_required_attributes(category_id, title, doc.get("brand", ""))
             item_payload = {
                 "title": title[:60],
                 "category_id": category_id,
@@ -779,6 +780,7 @@ async def publish_product(product_id: str, user_id: str = Depends(get_current_us
                 "condition": doc.get("condition", "new"),
                 "description": {"plain_text": doc.get("ai_description") or doc.get("description", "")},
                 "pictures": [{"source": u} for u in picture_urls],
+                "attributes": required_attributes,
             }
             # Vídeo é opcional — o Mercado Livre só aceita vídeos hospedados
             # no YouTube, referenciados pelo ID do vídeo. Se o link não for
@@ -1142,7 +1144,12 @@ async def ml_callback(code: str, state: str):
     )
     await db.oauth_states.delete_one({"state": state})
     frontend_url = os.environ.get("REACT_APP_BACKEND_URL", "/")
-    return RedirectResponse(url=f"{frontend_url}/settings?ml=connected")
+    # O site é uma página única (sem rotas reais tipo /settings) — ela só
+    # olha o parâmetro ?ml=connected na própria URL raiz. Redirecionar para
+    # um caminho "/settings" que não existe de verdade quebra em hosts que
+    # não têm fallback de rota (como o GitHub Pages, que responde 404 pra
+    # qualquer caminho sem um arquivo físico correspondente).
+    return RedirectResponse(url=f"{frontend_url}?ml=connected")
 
 
 @api.post("/ml/disconnect")

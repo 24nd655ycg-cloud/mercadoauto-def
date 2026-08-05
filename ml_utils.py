@@ -135,6 +135,46 @@ def predict_category(title: str, site_id: str = "MLB") -> str | None:
     return None
 
 
+def get_category_attributes(category_id: str) -> list[dict]:
+    """Lista os atributos da categoria (incluindo quais são obrigatórios),
+    direto da API pública do Mercado Livre."""
+    resp = requests.get(f"{ML_API_BASE}/categories/{category_id}/attributes", timeout=15)
+    resp.raise_for_status()
+    return resp.json()
+
+
+def build_required_attributes(category_id: str, title: str, brand: str) -> list[dict]:
+    """Monta, com melhor esforço, os atributos obrigatórios da categoria
+    prevista — cada categoria do Mercado Livre pode exigir atributos
+    diferentes (ex: 'family_name', 'BRAND'), e sem eles a publicação é
+    recusada. Só preenche automaticamente quando o campo é texto livre
+    (sem lista fechada de opções) — atributos com opções pré-definidas
+    (ex: cor, voltagem) não são adivinhados, para não inventar dado
+    técnico que não temos de verdade."""
+    try:
+        attrs = get_category_attributes(category_id)
+    except Exception as e:
+        logger.error(f"Falha ao buscar atributos da categoria {category_id}: {e}")
+        return []
+
+    result = []
+    for attr in attrs:
+        if not attr.get("tags", {}).get("required"):
+            continue
+        attr_id = attr.get("id", "")
+        has_closed_values = bool(attr.get("values"))
+        if attr_id == "BRAND":
+            result.append({"id": attr_id, "value_name": brand or "Genérica"})
+        elif attr_id in ("FAMILY_NAME", "MODEL", "LINE") and not has_closed_values:
+            result.append({"id": attr_id, "value_name": (brand or title)[:60]})
+        elif attr.get("value_type") == "string" and not has_closed_values:
+            result.append({"id": attr_id, "value_name": "Não especificado"})
+        # Atributos com lista fechada de valores (cor, voltagem, etc.) ficam
+        # de fora — preencher errado é pior do que deixar o Mercado Livre
+        # apontar exatamente qual falta, com o erro real já visível no site.
+    return result
+
+
 def update_item(access_token: str, ml_item_id: str, changes: dict) -> dict:
     """Atualiza um anúncio já publicado no Mercado Livre (PUT /items/{id}).
     `changes` deve conter só os campos que mudaram (ex: price, available_quantity,
