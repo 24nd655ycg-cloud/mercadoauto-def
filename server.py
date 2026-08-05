@@ -176,6 +176,10 @@ class ProductCreate(BaseDoc):
     external_image_urls: List[str] = []
     video_url: Optional[str] = None
     use_ai: bool = True
+    # Valores dos atributos obrigatórios do Mercado Livre (ex: {"FAMILY_NAME":
+    # "Sensor de Nível"}), preenchidos pela empresa no cadastro — ver
+    # GET /products/category-attributes.
+    ml_attributes: dict = {}
 
 
 class ProductUpdate(BaseDoc):
@@ -189,6 +193,7 @@ class ProductUpdate(BaseDoc):
     image_ids: Optional[List[str]] = None
     external_image_urls: Optional[List[str]] = None
     video_url: Optional[str] = None
+    ml_attributes: Optional[dict] = None
 
 
 class ProductOut(BaseDoc):
@@ -212,6 +217,7 @@ class ProductOut(BaseDoc):
     ml_permalink: Optional[str] = None
     ml_mock: bool = False
     error_message: Optional[str] = None
+    ml_attributes: dict = {}
     created_at: str
     updated_at: str
 
@@ -643,6 +649,7 @@ async def create_product(payload: ProductCreate, user_id: str = Depends(get_curr
         "image_ids": payload.image_ids,
         "external_image_urls": payload.external_image_urls,
         "video_url": payload.video_url,
+        "ml_attributes": payload.ml_attributes or {},
         "status": "draft",
         "ml_id": None,
         "ml_permalink": None,
@@ -768,7 +775,16 @@ async def publish_product(product_id: str, user_id: str = Depends(get_current_us
             # category_id de verdade do Mercado Livre — por isso a
             # categoria real é descoberta a partir do título do anúncio.
             category_id = ml_utils.predict_category(title) or "MLB1055"
-            required_attributes = ml_utils.build_required_attributes(category_id, title, doc.get("brand", ""))
+            auto_attributes = ml_utils.build_required_attributes(category_id, title, doc.get("brand", ""))
+            # Valores que a própria empresa preencheu no cadastro (reais)
+            # têm prioridade sobre o preenchimento automático de reforço —
+            # substitui qualquer atributo com o mesmo id.
+            user_attributes = doc.get("ml_attributes") or {}
+            attrs_by_id = {a["id"]: a for a in auto_attributes}
+            for attr_id, value in user_attributes.items():
+                if value:
+                    attrs_by_id[attr_id] = {"id": attr_id, "value_name": value}
+            required_attributes = list(attrs_by_id.values())
             item_payload = {
                 "title": title[:60],
                 "category_id": category_id,
@@ -851,6 +867,7 @@ def _product_public(doc: dict) -> dict:
         "ml_permalink": doc.get("ml_permalink"),
         "ml_mock": doc.get("ml_mock", False),
         "error_message": doc.get("error_message"),
+        "ml_attributes": doc.get("ml_attributes", {}),
         "created_at": doc.get("created_at", ""),
         "updated_at": doc.get("updated_at", ""),
     }
@@ -1256,6 +1273,44 @@ async def product_ai_suggest(product_id: str, user_id: str = Depends(get_current
         "ai_completed_fully": ai_result.get("ai_completed_fully", False),
         "web_search_used": ai_result.get("web_search_used", False),
     }
+
+
+@api.get("/products/category-attributes")
+async def category_attributes(title: str, user_id: str = Depends(get_current_user_id)):
+    """A partir do título do produto, descobre a categoria real no Mercado
+    Livre e devolve os atributos OBRIGATÓRIOS dessa categoria — pra empresa
+    preencher no cadastro, em vez do backend tentar adivinhar na hora de
+    publicar. Cada categoria pode exigir campos diferentes (ex: FAMILY_NAME,
+    BRAND, cor, voltagem...); isso muda dependendo do tipo de peça."""
+    title = (title or "").strip()
+    if not title:
+        return {"category_id": None, "category_name": None, "attributes": []}
+
+    category_id = ml_utils.predict_category(title)
+    if not category_id:
+        return {"category_id": None, "category_name": None, "attributes": []}
+
+    try:
+        raw_attrs = ml_utils.get_category_attributes(category_id)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Falha ao buscar atributos da categoria: {e}")
+
+    attributes = []
+    for attr in raw_attrs:
+        if not attr.get("tags", {}).get("required"):
+            continue
+        values = attr.get("values") or []
+        attributes.append({
+            "id": attr.get("id"),
+            "name": attr.get("name"),
+            "value_type": attr.get("value_type"),
+            # Se tiver lista fechada de opções (ex: cor, voltagem), manda
+            # as opções pro front-end virar um <select> — a empresa escolhe
+            # a opção real em vez de digitar texto livre.
+            "options": [{"id": v.get("id"), "name": v.get("name")} for v in values] if values else None,
+        })
+
+    return {"category_id": category_id, "category_name": None, "attributes": attributes}
 
 
 @api.get("/products/lookup-sku")
