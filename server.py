@@ -7,7 +7,7 @@ import uuid
 import logging
 import secrets
 from pathlib import Path
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
 # Load env FIRST before importing our modules that read env at import time
@@ -350,6 +350,56 @@ async def login(payload: UserLogin):
     return {"token": token, "user": _user_public(doc)}
 
 
+async def get_valid_ml_access_token(user: dict) -> str:
+    """Garante um token de acesso válido do Mercado Livre para este usuário —
+    renovando automaticamente (via refresh_token) se o token atual já
+    expirou ou está prestes a expirar. Sem isso, o token vence a cada poucas
+    horas e toda ação no Mercado Livre passa a falhar com 401 'invalid
+    access token' até a empresa desconectar e conectar de novo."""
+    access_token = user.get("ml_access_token")
+    refresh = user.get("ml_refresh_token")
+    expires_at_raw = user.get("ml_token_expires_at")
+
+    needs_refresh = True
+    if expires_at_raw:
+        try:
+            expires_at = datetime.fromisoformat(expires_at_raw)
+            # Renova um pouco antes de vencer de verdade (margem de 2 min)
+            needs_refresh = datetime.now(timezone.utc) >= (expires_at - timedelta(minutes=2))
+        except ValueError:
+            needs_refresh = True  # valor antigo/no formato errado (duração, não data) — força renovar
+
+    if not needs_refresh and access_token:
+        return access_token
+
+    if not refresh:
+        raise HTTPException(
+            status_code=400,
+            detail="Sua conexão com o Mercado Livre expirou e não há como renovar automaticamente. Desconecte e conecte a conta de novo em Configurações.",
+        )
+
+    try:
+        tokens = ml_utils.refresh_token(user, refresh)
+    except Exception as e:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Falha ao renovar a conexão com o Mercado Livre: {e}. Desconecte e conecte a conta de novo em Configurações.",
+        )
+
+    new_expires_in = tokens.get("expires_in") or 21600
+    new_expires_at = (datetime.now(timezone.utc) + timedelta(seconds=new_expires_in)).isoformat()
+    new_access_token = tokens.get("access_token")
+    await db.users.update_one(
+        {"id": user["id"]},
+        {"$set": {
+            "ml_access_token": new_access_token,
+            "ml_refresh_token": tokens.get("refresh_token", refresh),
+            "ml_token_expires_at": new_expires_at,
+        }},
+    )
+    return new_access_token
+
+
 @api.get("/auth/me")
 async def me(user_id: str = Depends(get_current_user_id)):
     doc = await db.users.find_one({"id": user_id})
@@ -646,6 +696,7 @@ async def update_product(product_id: str, payload: ProductUpdate, user_id: str =
     if doc.get("status") == "published" and ml_item_id and not doc.get("ml_mock"):
         user = await db.users.find_one({"id": user_id})
         if user and user.get("ml_access_token"):
+            access_token = await get_valid_ml_access_token(user)
             item_changes = {}
             if "title" in updates:
                 item_changes["title"] = updates["title"][:60]
@@ -655,9 +706,9 @@ async def update_product(product_id: str, payload: ProductUpdate, user_id: str =
                 item_changes["available_quantity"] = updates["quantity"]
             try:
                 if item_changes:
-                    ml_utils.update_item(user["ml_access_token"], ml_item_id, item_changes)
+                    ml_utils.update_item(access_token, ml_item_id, item_changes)
                 if "description" in updates:
-                    ml_utils.update_item_description(user["ml_access_token"], ml_item_id, updates["description"])
+                    ml_utils.update_item_description(access_token, ml_item_id, updates["description"])
             except Exception as e:
                 logger.error(f"Falha ao atualizar anúncio no ML: {e}")
                 raise HTTPException(status_code=502, detail=f"Salvo no MercadoAuto, mas falhou ao atualizar no Mercado Livre: {e}")
@@ -686,6 +737,14 @@ async def publish_product(product_id: str, user_id: str = Depends(get_current_us
 
     # Real ML publish path
     if ml_utils.is_configured(user) and user and user.get("ml_access_token"):
+        try:
+            access_token = await get_valid_ml_access_token(user)
+        except HTTPException as e:
+            updates = {"status": "error", "error_message": e.detail, "updated_at": now}
+            await db.products.update_one({"id": product_id}, {"$set": updates})
+            doc.update(updates)
+            return _product_public(doc)
+
         # Fotos vêm de duas origens: enviadas direto pelo upload da empresa
         # (image_ids, guardadas no nosso storage) ou coladas como URL
         # externa (external_image_urls). O Mercado Livre precisa de uma URL
@@ -728,7 +787,7 @@ async def publish_product(product_id: str, user_id: str = Depends(get_current_us
             youtube_id = _extract_youtube_id(doc.get("video_url"))
             if youtube_id:
                 item_payload["videos"] = [{"id": youtube_id}]
-            resp = ml_utils.publish_item(user["ml_access_token"], item_payload)
+            resp = ml_utils.publish_item(access_token, item_payload)
             updates = {
                 "status": "published",
                 "ml_id": resp.get("id"),
@@ -1066,6 +1125,11 @@ async def ml_callback(code: str, state: str):
         tokens = ml_utils.exchange_code(user, code)
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Falha ao trocar code: {e}")
+    # expires_in vem em SEGUNDOS de duração (ex: 21600 = 6h) — o que
+    # precisamos guardar é o momento real em que o token expira, não a
+    # duração, senão não dá pra saber depois se ele já venceu.
+    expires_in = tokens.get("expires_in") or 21600
+    expires_at = (datetime.now(timezone.utc) + timedelta(seconds=expires_in)).isoformat()
     await db.users.update_one(
         {"id": st["user_id"]},
         {"$set": {
@@ -1073,7 +1137,7 @@ async def ml_callback(code: str, state: str):
             "ml_user_id": str(tokens.get("user_id", "")),
             "ml_access_token": tokens.get("access_token"),
             "ml_refresh_token": tokens.get("refresh_token"),
-            "ml_token_expires_at": tokens.get("expires_in"),
+            "ml_token_expires_at": expires_at,
         }},
     )
     await db.oauth_states.delete_one({"state": state})
@@ -1104,8 +1168,9 @@ async def ml_import_listings(user_id: str = Depends(get_current_user_id)):
     if not user or not user.get("ml_connected") or not user.get("ml_access_token"):
         raise HTTPException(status_code=400, detail="Conecte sua conta do Mercado Livre antes de importar os anúncios")
 
+    access_token = await get_valid_ml_access_token(user)
     try:
-        listings = ml_utils.fetch_seller_listings(user["ml_access_token"])
+        listings = ml_utils.fetch_seller_listings(access_token)
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Falha ao buscar anúncios no Mercado Livre: {e}")
 
