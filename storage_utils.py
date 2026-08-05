@@ -1,70 +1,82 @@
-"""Object storage for uploaded images, stored directly in MongoDB.
+"""Armazenamento de arquivos (fotos de produto) via Cloudflare R2 —
+compatível com a API do S3, usando boto3 (já presente no requirements.txt).
+Substitui a versão anterior, que dependia de um serviço exclusivo da
+plataforma Emergent e não funcionava fora dela.
 
-Antes esse módulo dependia de um serviço externo específico da plataforma
-Emergent (integrations.emergentagent.com), que só funciona dentro daquele
-ambiente e estava falhando em produção (a variável EMERGENT_LLM_KEY nem
-está configurada no Railway — por isso todo upload de foto de produto
-falhava com erro 500, silenciosamente, sem nenhuma imagem chegar a ser
-salva). Trocamos por uma coleção Mongo dedicada, que reaproveita a mesma
-conexão que o resto do app já usa (MONGO_URL / DB_NAME) — nenhuma
-credencial nova é necessária.
-
-Guardamos o binário do arquivo direto no documento (campo `data`). Isso é
-adequado para fotos de produto (poucos MB cada, e o limite de documento do
-MongoDB é 16MB). Se o volume de imagens crescer muito, migrar para GridFS
-ou S3 (boto3 já está nas dependências) é o próximo passo natural — mas essa
-troca resolve o bug de produção agora, sem exigir nenhuma conta nova.
+Variáveis de ambiente necessárias (configure no Railway):
+  R2_ACCOUNT_ID          — encontrado no painel do Cloudflare (R2 → Overview)
+  R2_ACCESS_KEY_ID       — criado em R2 → Manage API Tokens
+  R2_SECRET_ACCESS_KEY   — gerado junto com o Access Key ID (só aparece uma vez)
+  R2_BUCKET_NAME         — nome do bucket criado no R2 (ex: "mercadoauto")
 """
 import os
 import logging
-from datetime import datetime, timezone
-from bson import Binary
-from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorCollection
+import boto3
+from botocore.config import Config
+from botocore.exceptions import ClientError
 
 logger = logging.getLogger(__name__)
 
 APP_NAME = os.environ.get("APP_NAME", "mercadoauto")
 
-_collection: AsyncIOMotorCollection | None = None
+R2_ACCOUNT_ID = os.environ.get("R2_ACCOUNT_ID")
+R2_ACCESS_KEY_ID = os.environ.get("R2_ACCESS_KEY_ID")
+R2_SECRET_ACCESS_KEY = os.environ.get("R2_SECRET_ACCESS_KEY")
+R2_BUCKET_NAME = os.environ.get("R2_BUCKET_NAME", "mercadoauto")
+
+_client = None
 
 
-def init_storage() -> AsyncIOMotorCollection:
-    """Inicializa (uma vez só) a coleção usada como storage. Não faz nenhuma
-    chamada de rede além da conexão Mongo já usada pelo restante do app."""
-    global _collection
-    if _collection is not None:
-        return _collection
-    mongo_url = os.environ["MONGO_URL"]
-    db_name = os.environ["DB_NAME"]
-    client = AsyncIOMotorClient(mongo_url)
-    db = client[db_name]
-    _collection = db["object_storage"]
-    logger.info("Object storage (MongoDB collection) initialized")
-    return _collection
-
-
-async def put_object(path: str, data: bytes, content_type: str) -> dict:
-    collection = init_storage()
-    await collection.replace_one(
-        {"path": path},
-        {
-            "path": path,
-            "data": Binary(data),
-            "content_type": content_type,
-            "size": len(data),
-            "updated_at": datetime.now(timezone.utc).isoformat(),
-        },
-        upsert=True,
+def _get_client():
+    global _client
+    if _client is not None:
+        return _client
+    if not (R2_ACCOUNT_ID and R2_ACCESS_KEY_ID and R2_SECRET_ACCESS_KEY):
+        raise RuntimeError(
+            "Credenciais do Cloudflare R2 não configuradas — defina "
+            "R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY e "
+            "R2_BUCKET_NAME nas variáveis de ambiente do Railway."
+        )
+    endpoint = f"https://{R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+    _client = boto3.client(
+        "s3",
+        endpoint_url=endpoint,
+        aws_access_key_id=R2_ACCESS_KEY_ID,
+        aws_secret_access_key=R2_SECRET_ACCESS_KEY,
+        config=Config(signature_version="s3v4"),
+        region_name="auto",
     )
+    return _client
+
+
+def init_storage():
+    """Mantido por compatibilidade com o startup do server.py — com R2/S3
+    não existe uma etapa real de "inicialização"; aqui só confirmamos que
+    as credenciais estão presentes, para o aviso no log ser claro se não
+    estiverem."""
+    _get_client()
+    logger.info("Cloudflare R2 storage pronto (bucket: %s)", R2_BUCKET_NAME)
+    return True
+
+
+def put_object(path: str, data: bytes, content_type: str) -> dict:
+    client = _get_client()
+    client.put_object(Bucket=R2_BUCKET_NAME, Key=path, Body=data, ContentType=content_type)
     return {"path": path, "size": len(data)}
 
 
-async def get_object(path: str) -> tuple[bytes, str]:
-    collection = init_storage()
-    doc = await collection.find_one({"path": path})
-    if not doc:
-        raise FileNotFoundError(f"Arquivo não encontrado no storage: {path}")
-    return bytes(doc["data"]), doc.get("content_type", "application/octet-stream")
+def get_object(path: str) -> tuple[bytes, str]:
+    client = _get_client()
+    try:
+        resp = client.get_object(Bucket=R2_BUCKET_NAME, Key=path)
+    except ClientError as e:
+        code = e.response.get("Error", {}).get("Code", "")
+        if code in ("NoSuchKey", "404"):
+            raise FileNotFoundError(path)
+        raise
+    data = resp["Body"].read()
+    content_type = resp.get("ContentType", "application/octet-stream")
+    return data, content_type
 
 
 MIME_TYPES = {
