@@ -686,10 +686,12 @@ async def list_products(
 @api.get("/products/category-attributes")
 async def category_attributes(title: str, query: str = "", user_id: str = Depends(get_current_user_id)):
     """A partir do título do produto, descobre a categoria real no Mercado
-    Livre e devolve os atributos OBRIGATÓRIOS dessa categoria — pra empresa
-    preencher no cadastro, em vez do backend tentar adivinhar na hora de
-    publicar. Cada categoria pode exigir campos diferentes (ex: FAMILY_NAME,
-    BRAND, cor, voltagem...); isso muda dependendo do tipo de peça.
+    Livre e devolve os atributos dessa categoria — tanto os obrigatórios
+    quanto os opcionais (com a opção de marcar 'Não se aplica'), igual à
+    tela oficial de anúncio do próprio Mercado Livre. Isso evita depender
+    de adivinhar exatamente qual 'tag' cada atributo usa internamente pra
+    indicar obrigatoriedade — mostra tudo, do jeito que o vendedor veria
+    anunciando manualmente no site do Mercado Livre.
 
     `query` é opcional — se a categoria detectada a partir do título
     completo vier errada (títulos de autopeça costumam ser longos e
@@ -714,26 +716,29 @@ async def category_attributes(title: str, query: str = "", user_id: str = Depend
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Falha ao buscar atributos da categoria: {e}")
 
+    # Atributos técnicos/internos que o Mercado Livre não mostra pro
+    # vendedor preencher (aparecem na API, mas são De uso interno da
+    # plataforma) — ficam de fora pra não confundir.
+    hidden_ids = {"GTIN", "SELLER_SKU", "EMPTY_GTIN_REASON"}
+
     attributes = []
     for attr in raw_attrs:
         tags = attr.get("tags", {})
-        attr_id = (attr.get("id") or "").upper()
-        # Alguns atributos (como FAMILY_NAME em muitas categorias de
-        # autopeças) vêm sem a tag 'required' nem 'catalog_required' na
-        # resposta da API, mas o Mercado Livre exige do mesmo jeito na hora
-        # de publicar — confirmado repetidamente na prática. Por isso,
-        # força a inclusão desse campo específico sempre que ele existir
-        # na categoria, independente do que as tags dizem.
-        is_known_hidden_required = attr_id in ("FAMILY_NAME",)
-        if not (tags.get("required") or tags.get("catalog_required") or is_known_hidden_required):
+        attr_id = attr.get("id") or ""
+        if attr_id in hidden_ids or tags.get("hidden") or tags.get("read_only"):
             continue
         values = attr.get("values") or []
         attributes.append({
-            "id": attr.get("id"),
+            "id": attr_id,
             "name": attr.get("name"),
             "value_type": attr.get("value_type"),
+            "required": bool(tags.get("required") or tags.get("catalog_required")),
             "options": [{"id": v.get("id"), "name": v.get("name")} for v in values] if values else None,
         })
+
+    # Obrigatórios primeiro, depois opcionais — igual à ordem que costuma
+    # aparecer na tela real do Mercado Livre.
+    attributes.sort(key=lambda a: not a["required"])
 
     return {"category_id": category_id, "category_name": ml_utils.get_category_name(category_id), "attributes": attributes}
 
