@@ -115,15 +115,21 @@ def publish_item(access_token: str, item: dict) -> dict:
     return resp.json()
 
 
-def get_category_tree(category_id: str | None = None, site_id: str = "MLB") -> dict:
+def get_category_tree(category_id: str | None = None, site_id: str = "MLB", access_token: str | None = None) -> dict:
     """Lista as subcategorias de uma categoria (ou as categorias raiz, se
     category_id não for informado) — pra empresa navegar manualmente até a
     categoria exata do produto, igual ao fluxo de anúncio manual do próprio
     Mercado Livre. Mais confiável que a previsão automática por texto, que
     pode escorregar pra uma categoria completamente errada (como já vimos
-    na prática)."""
+    na prática).
+
+    `access_token`: passa o token da conta conectada quando disponível —
+    o endpoint de listar categorias raiz vem recusando chamadas anônimas
+    com 403 (diferente de outros endpoints "públicos" que seguem
+    funcionando sem token)."""
+    headers = {"Authorization": f"Bearer {access_token}"} if access_token else {}
     if not category_id:
-        resp = requests.get(f"{ML_API_BASE}/sites/{site_id}/categories", timeout=15)
+        resp = requests.get(f"{ML_API_BASE}/sites/{site_id}/categories", headers=headers, timeout=15)
         resp.raise_for_status()
         data = resp.json()
         return {
@@ -133,7 +139,7 @@ def get_category_tree(category_id: str | None = None, site_id: str = "MLB") -> d
             "children": [{"id": c.get("id"), "name": c.get("name")} for c in data],
             "is_leaf": False,
         }
-    resp = requests.get(f"{ML_API_BASE}/categories/{category_id}", timeout=15)
+    resp = requests.get(f"{ML_API_BASE}/categories/{category_id}", headers=headers, timeout=15)
     resp.raise_for_status()
     data = resp.json()
     children = data.get("children_categories") or []

@@ -693,8 +693,15 @@ async def category_browser(parent_id: str = "", user_id: str = Depends(get_curre
     Chame sem 'parent_id' pra pegar as categorias raiz; depois, chame de
     novo passando o 'id' de uma categoria pra ver as subcategorias dela —
     até chegar numa categoria-folha (is_leaf=true, sem mais filhos)."""
+    access_token = None
+    user = await db.users.find_one({"id": user_id})
+    if user and user.get("ml_connected") and user.get("ml_access_token"):
+        try:
+            access_token = await get_valid_ml_access_token(user)
+        except HTTPException:
+            access_token = None  # segue sem token — a chamada pode falhar com 403 nesse caso, mas não trava o resto
     try:
-        return ml_utils.get_category_tree(parent_id or None)
+        return ml_utils.get_category_tree(parent_id or None, access_token=access_token)
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Falha ao buscar categorias: {e}")
 
