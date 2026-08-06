@@ -680,6 +680,82 @@ async def list_products(
     return [_product_public(d) for d in docs]
 
 
+@api.get("/products/category-attributes")
+async def category_attributes(title: str, user_id: str = Depends(get_current_user_id)):
+    """A partir do título do produto, descobre a categoria real no Mercado
+    Livre e devolve os atributos OBRIGATÓRIOS dessa categoria — pra empresa
+    preencher no cadastro, em vez do backend tentar adivinhar na hora de
+    publicar. Cada categoria pode exigir campos diferentes (ex: FAMILY_NAME,
+    BRAND, cor, voltagem...); isso muda dependendo do tipo de peça.
+
+    IMPORTANTE: essa rota precisa estar declarada ANTES de
+    '/products/{product_id}' — senão o FastAPI trata "category-attributes"
+    como se fosse um product_id (rotas com parâmetro casam com qualquer
+    texto se vierem primeiro na ordem de declaração)."""
+    title = (title or "").strip()
+    if not title:
+        return {"category_id": None, "category_name": None, "attributes": []}
+
+    category_id = ml_utils.predict_category(title)
+    if not category_id:
+        return {"category_id": None, "category_name": None, "attributes": []}
+
+    try:
+        raw_attrs = ml_utils.get_category_attributes(category_id)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Falha ao buscar atributos da categoria: {e}")
+
+    attributes = []
+    for attr in raw_attrs:
+        if not attr.get("tags", {}).get("required"):
+            continue
+        values = attr.get("values") or []
+        attributes.append({
+            "id": attr.get("id"),
+            "name": attr.get("name"),
+            "value_type": attr.get("value_type"),
+            "options": [{"id": v.get("id"), "name": v.get("name")} for v in values] if values else None,
+        })
+
+    return {"category_id": category_id, "category_name": None, "attributes": attributes}
+
+
+@api.get("/products/lookup-sku")
+async def lookup_sku(sku: str, brand: str = "", user_id: str = Depends(get_current_user_id)):
+    """Ao digitar um SKU na tela de novo anúncio, sugere título e faixa de
+    preço — primeiro olhando o próprio catálogo da empresa (se esse SKU já
+    foi cadastrado/importado antes), e senão buscando anúncios reais e
+    parecidos no catálogo público do Mercado Livre.
+
+    (Mesmo motivo acima: precisa vir ANTES de '/products/{product_id}'.)"""
+    sku = (sku or "").strip()
+    if not sku:
+        return {"found": False}
+
+    existing = await db.products.find_one({"user_id": user_id, "sku": sku})
+    if existing:
+        return {
+            "found": True,
+            "source": "own_catalog",
+            "title": existing.get("title", ""),
+            "description": existing.get("description", ""),
+            "price": existing.get("price"),
+        }
+
+    suggestion = ml_utils.suggest_from_sku(sku=sku, brand=brand)
+    if not suggestion.get("found"):
+        return {"found": False}
+
+    return {
+        "found": True,
+        "source": "mercado_livre_search",
+        "title": suggestion["suggested_title"],
+        "price_min": suggestion["price_min"],
+        "price_max": suggestion["price_max"],
+        "sample_count": suggestion["sample_count"],
+    }
+
+
 @api.get("/products/{product_id}", response_model=ProductOut)
 async def get_product(product_id: str, user_id: str = Depends(get_current_user_id)):
     doc = await db.products.find_one({"id": product_id, "user_id": user_id}, {"_id": 0})
@@ -1275,79 +1351,6 @@ async def product_ai_suggest(product_id: str, user_id: str = Depends(get_current
     }
 
 
-@api.get("/products/category-attributes")
-async def category_attributes(title: str, user_id: str = Depends(get_current_user_id)):
-    """A partir do título do produto, descobre a categoria real no Mercado
-    Livre e devolve os atributos OBRIGATÓRIOS dessa categoria — pra empresa
-    preencher no cadastro, em vez do backend tentar adivinhar na hora de
-    publicar. Cada categoria pode exigir campos diferentes (ex: FAMILY_NAME,
-    BRAND, cor, voltagem...); isso muda dependendo do tipo de peça."""
-    title = (title or "").strip()
-    if not title:
-        return {"category_id": None, "category_name": None, "attributes": []}
-
-    category_id = ml_utils.predict_category(title)
-    if not category_id:
-        return {"category_id": None, "category_name": None, "attributes": []}
-
-    try:
-        raw_attrs = ml_utils.get_category_attributes(category_id)
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Falha ao buscar atributos da categoria: {e}")
-
-    attributes = []
-    for attr in raw_attrs:
-        if not attr.get("tags", {}).get("required"):
-            continue
-        values = attr.get("values") or []
-        attributes.append({
-            "id": attr.get("id"),
-            "name": attr.get("name"),
-            "value_type": attr.get("value_type"),
-            # Se tiver lista fechada de opções (ex: cor, voltagem), manda
-            # as opções pro front-end virar um <select> — a empresa escolhe
-            # a opção real em vez de digitar texto livre.
-            "options": [{"id": v.get("id"), "name": v.get("name")} for v in values] if values else None,
-        })
-
-    return {"category_id": category_id, "category_name": None, "attributes": attributes}
-
-
-@api.get("/products/lookup-sku")
-async def lookup_sku(sku: str, brand: str = "", user_id: str = Depends(get_current_user_id)):
-    """Ao digitar um SKU na tela de novo anúncio, sugere título e faixa de
-    preço — primeiro olhando o próprio catálogo da empresa (se esse SKU já
-    foi cadastrado/importado antes), e senão buscando anúncios reais e
-    parecidos no catálogo público do Mercado Livre."""
-    sku = (sku or "").strip()
-    if not sku:
-        return {"found": False}
-
-    existing = await db.products.find_one({"user_id": user_id, "sku": sku})
-    if existing:
-        return {
-            "found": True,
-            "source": "own_catalog",
-            "title": existing.get("title", ""),
-            "description": existing.get("description", ""),
-            "price": existing.get("price"),
-        }
-
-    suggestion = ml_utils.suggest_from_sku(sku=sku, brand=brand)
-    if not suggestion.get("found"):
-        return {"found": False}
-
-    return {
-        "found": True,
-        "source": "mercado_livre_search",
-        "title": suggestion["suggested_title"],
-        "price_min": suggestion["price_min"],
-        "price_max": suggestion["price_max"],
-        "sample_count": suggestion["sample_count"],
-    }
-
-
-# ============== Dashboard stats ==============
 @api.get("/stats")
 async def stats(user_id: str = Depends(get_current_user_id)):
     total = await db.products.count_documents({"user_id": user_id})
