@@ -883,6 +883,14 @@ async def publish_product(product_id: str, user_id: str = Depends(get_current_us
             for attr_id, value in user_attributes.items():
                 if value:
                     attrs_by_id[attr_id] = {"id": attr_id, "value_name": value}
+            # Rede de segurança incondicional: o Mercado Livre já rejeitou
+            # anúncios reais desta conta por falta de 'FAMILY_NAME', mesmo
+            # quando esse atributo não aparece na lista pública de atributos
+            # da categoria (API de listagem e API de validação divergem
+            # nesse campo, nessa conta). Por isso, garante que ele sempre
+            # vá — não depende de ter sido "descoberto" antes.
+            if "FAMILY_NAME" not in attrs_by_id:
+                attrs_by_id["FAMILY_NAME"] = {"id": "FAMILY_NAME", "value_name": (doc.get("brand") or title)[:60]}
             required_attributes = list(attrs_by_id.values())
             item_payload = {
                 "title": title[:60],
@@ -1267,6 +1275,36 @@ async def ml_callback(code: str, state: str):
     # não têm fallback de rota (como o GitHub Pages, que responde 404 pra
     # qualquer caminho sem um arquivo físico correspondente).
     return RedirectResponse(url=f"{frontend_url}?ml=connected")
+
+
+@api.get("/ml/connection-status")
+async def ml_connection_status(user_id: str = Depends(get_current_user_id)):
+    """Confirma, em tempo real, se a conexão com o Mercado Livre está
+    realmente ativa — chamando a própria API deles (não confia só no que
+    está salvo no nosso banco, que pode estar desatualizado se a
+    autorização foi revogada ou substituída do lado do Mercado Livre)."""
+    user = await db.users.find_one({"id": user_id})
+    if not user or not user.get("ml_connected") or not user.get("ml_access_token"):
+        return {"ok": False, "reason": "not_connected", "message": "Nenhuma conta do Mercado Livre conectada."}
+
+    try:
+        access_token = await get_valid_ml_access_token(user)
+    except HTTPException as e:
+        return {"ok": False, "reason": "token_refresh_failed", "message": e.detail}
+
+    try:
+        info = ml_utils.get_user_info(access_token)
+        return {
+            "ok": True,
+            "ml_user_id": info.get("id"),
+            "ml_nickname": info.get("nickname"),
+            "ml_site_id": info.get("site_id"),
+        }
+    except Exception as e:
+        msg = str(e)
+        if "401" in msg:
+            return {"ok": False, "reason": "unauthorized", "message": "O Mercado Livre recusou o token (401) — a autorização pode ter sido revogada ou ficado inativa do lado deles. Desconecte e conecte de novo."}
+        return {"ok": False, "reason": "request_failed", "message": msg}
 
 
 @api.post("/ml/disconnect")

@@ -217,13 +217,20 @@ def update_item_description(access_token: str, ml_item_id: str, plain_text: str)
 
 def get_user_id(access_token: str) -> str:
     """Retorna o user_id do vendedor autenticado (dono do token)."""
+    return str(get_user_info(access_token)["id"])
+
+
+def get_user_info(access_token: str) -> dict:
+    """Dados completos do vendedor autenticado (id, nickname, site_id...) —
+    usado tanto para pegar o user_id quanto para confirmar, em tempo real,
+    se a conexão com o Mercado Livre está realmente ativa."""
     resp = requests.get(
         f"{ML_API_BASE}/users/me",
         headers={"Authorization": f"Bearer {access_token}"},
         timeout=30,
     )
     resp.raise_for_status()
-    return str(resp.json()["id"])
+    return resp.json()
 
 
 def list_item_ids(access_token: str, user_id: str, offset: int = 0, limit: int = 50) -> dict:
