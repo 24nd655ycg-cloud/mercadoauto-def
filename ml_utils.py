@@ -115,6 +115,37 @@ def publish_item(access_token: str, item: dict) -> dict:
     return resp.json()
 
 
+def get_category_tree(category_id: str | None = None, site_id: str = "MLB") -> dict:
+    """Lista as subcategorias de uma categoria (ou as categorias raiz, se
+    category_id não for informado) — pra empresa navegar manualmente até a
+    categoria exata do produto, igual ao fluxo de anúncio manual do próprio
+    Mercado Livre. Mais confiável que a previsão automática por texto, que
+    pode escorregar pra uma categoria completamente errada (como já vimos
+    na prática)."""
+    if not category_id:
+        resp = requests.get(f"{ML_API_BASE}/sites/{site_id}/categories", timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+        return {
+            "id": None,
+            "name": None,
+            "path": [],
+            "children": [{"id": c.get("id"), "name": c.get("name")} for c in data],
+            "is_leaf": False,
+        }
+    resp = requests.get(f"{ML_API_BASE}/categories/{category_id}", timeout=15)
+    resp.raise_for_status()
+    data = resp.json()
+    children = data.get("children_categories") or []
+    return {
+        "id": data.get("id"),
+        "name": data.get("name"),
+        "path": [{"id": p.get("id"), "name": p.get("name")} for p in (data.get("path_from_root") or [])],
+        "children": [{"id": c.get("id"), "name": c.get("name")} for c in children],
+        "is_leaf": len(children) == 0,
+    }
+
+
 def predict_category(title: str, site_id: str = "MLB") -> str | None:
     """Descobre a categoria real do Mercado Livre a partir do título do
     produto, usando a API pública de sugestão de categoria — em vez de usar

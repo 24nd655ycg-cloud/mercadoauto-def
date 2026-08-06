@@ -683,15 +683,32 @@ async def list_products(
     return [_product_public(d) for d in docs]
 
 
+@api.get("/products/category-browser")
+async def category_browser(parent_id: str = "", user_id: str = Depends(get_current_user_id)):
+    """Navega a árvore REAL de categorias do Mercado Livre, igual ao fluxo
+    manual de anúncio no site deles — a empresa escolhe a categoria certa
+    na mão, clicando nível por nível, em vez de depender só da previsão
+    automática por texto (que pode escorregar pra categoria errada).
+
+    Chame sem 'parent_id' pra pegar as categorias raiz; depois, chame de
+    novo passando o 'id' de uma categoria pra ver as subcategorias dela —
+    até chegar numa categoria-folha (is_leaf=true, sem mais filhos)."""
+    try:
+        return ml_utils.get_category_tree(parent_id or None)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Falha ao buscar categorias: {e}")
+
+
 @api.get("/products/category-attributes")
-async def category_attributes(title: str, query: str = "", user_id: str = Depends(get_current_user_id)):
-    """A partir do título do produto, descobre a categoria real no Mercado
-    Livre e devolve os atributos dessa categoria — tanto os obrigatórios
-    quanto os opcionais (com a opção de marcar 'Não se aplica'), igual à
-    tela oficial de anúncio do próprio Mercado Livre. Isso evita depender
-    de adivinhar exatamente qual 'tag' cada atributo usa internamente pra
-    indicar obrigatoriedade — mostra tudo, do jeito que o vendedor veria
-    anunciando manualmente no site do Mercado Livre.
+async def category_attributes(title: str = "", query: str = "", category_id: str = "", user_id: str = Depends(get_current_user_id)):
+    """A partir do título do produto (ou de uma categoria já escolhida
+    manualmente via /products/category-browser), devolve os atributos
+    dessa categoria — tanto os obrigatórios quanto os opcionais (com a
+    opção de marcar 'Não se aplica'), igual à tela oficial de anúncio do
+    próprio Mercado Livre. Isso evita depender de adivinhar exatamente
+    qual 'tag' cada atributo usa internamente pra indicar obrigatoriedade
+    — mostra tudo, do jeito que o vendedor veria anunciando manualmente no
+    site do Mercado Livre.
 
     `query` é opcional — se a categoria detectada a partir do título
     completo vier errada (títulos de autopeça costumam ser longos e
@@ -699,20 +716,24 @@ async def category_attributes(title: str, query: str = "", user_id: str = Depend
     curto/direto pra tentar de novo (ex: 'junta cabeçote' em vez do título
     inteiro com a lista de veículos compatíveis).
 
+    `category_id` é opcional — se já vier de uma escolha manual via
+    /products/category-browser, pula a previsão automática por completo.
+
     IMPORTANTE: essa rota precisa estar declarada ANTES de
     '/products/{product_id}' — senão o FastAPI trata "category-attributes"
     como se fosse um product_id (rotas com parâmetro casam com qualquer
     texto se vierem primeiro na ordem de declaração)."""
-    search_text = (query or title or "").strip()
-    if not search_text:
-        return {"category_id": None, "category_name": None, "attributes": []}
-
-    category_id = ml_utils.predict_category(search_text)
-    if not category_id:
-        return {"category_id": None, "category_name": None, "attributes": []}
+    resolved_category_id = category_id.strip() if category_id else None
+    if not resolved_category_id:
+        search_text = (query or title or "").strip()
+        if not search_text:
+            return {"category_id": None, "category_name": None, "attributes": []}
+        resolved_category_id = ml_utils.predict_category(search_text)
+        if not resolved_category_id:
+            return {"category_id": None, "category_name": None, "attributes": []}
 
     try:
-        raw_attrs = ml_utils.get_category_attributes(category_id)
+        raw_attrs = ml_utils.get_category_attributes(resolved_category_id)
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Falha ao buscar atributos da categoria: {e}")
 
@@ -740,7 +761,7 @@ async def category_attributes(title: str, query: str = "", user_id: str = Depend
     # aparecer na tela real do Mercado Livre.
     attributes.sort(key=lambda a: not a["required"])
 
-    return {"category_id": category_id, "category_name": ml_utils.get_category_name(category_id), "attributes": attributes}
+    return {"category_id": resolved_category_id, "category_name": ml_utils.get_category_name(resolved_category_id), "attributes": attributes}
 
 
 @api.get("/products/lookup-sku")
