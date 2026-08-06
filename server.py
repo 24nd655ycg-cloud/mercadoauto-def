@@ -717,11 +717,15 @@ async def category_attributes(title: str, query: str = "", user_id: str = Depend
     attributes = []
     for attr in raw_attrs:
         tags = attr.get("tags", {})
+        attr_id = (attr.get("id") or "").upper()
         # Alguns atributos (como FAMILY_NAME em muitas categorias de
-        # autopeças) vêm marcados como 'catalog_required' em vez de
-        # 'required' — mas o Mercado Livre exige do mesmo jeito na hora de
-        # publicar. Pega os dois tipos, pra não deixar passar nenhum.
-        if not (tags.get("required") or tags.get("catalog_required")):
+        # autopeças) vêm sem a tag 'required' nem 'catalog_required' na
+        # resposta da API, mas o Mercado Livre exige do mesmo jeito na hora
+        # de publicar — confirmado repetidamente na prática. Por isso,
+        # força a inclusão desse campo específico sempre que ele existir
+        # na categoria, independente do que as tags dizem.
+        is_known_hidden_required = attr_id in ("FAMILY_NAME",)
+        if not (tags.get("required") or tags.get("catalog_required") or is_known_hidden_required):
             continue
         values = attr.get("values") or []
         attributes.append({

@@ -173,9 +173,10 @@ def build_required_attributes(category_id: str, title: str, brand: str) -> list[
     result = []
     for attr in attrs:
         tags = attr.get("tags", {})
-        if not (tags.get("required") or tags.get("catalog_required")):
-            continue
         attr_id = attr.get("id", "")
+        is_known_hidden_required = attr_id.upper() in ("FAMILY_NAME",)
+        if not (tags.get("required") or tags.get("catalog_required") or is_known_hidden_required):
+            continue
         has_closed_values = bool(attr.get("values"))
         if attr_id == "BRAND":
             result.append({"id": attr_id, "value_name": brand or "Genérica"})
