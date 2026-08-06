@@ -143,6 +143,19 @@ def get_category_attributes(category_id: str) -> list[dict]:
     return resp.json()
 
 
+def get_category_name(category_id: str) -> str | None:
+    """Nome legível da categoria (ex: 'Juntas e Vedações Automotivas') —
+    usado só para exibir na tela, pra empresa perceber rápido se a
+    previsão de categoria escorregou para algo claramente errado."""
+    try:
+        resp = requests.get(f"{ML_API_BASE}/categories/{category_id}", timeout=15)
+        resp.raise_for_status()
+        return resp.json().get("name")
+    except Exception as e:
+        logger.error(f"Falha ao buscar nome da categoria {category_id}: {e}")
+        return None
+
+
 def build_required_attributes(category_id: str, title: str, brand: str) -> list[dict]:
     """Monta, com melhor esforço, os atributos obrigatórios da categoria
     prevista — cada categoria do Mercado Livre pode exigir atributos
@@ -159,7 +172,8 @@ def build_required_attributes(category_id: str, title: str, brand: str) -> list[
 
     result = []
     for attr in attrs:
-        if not attr.get("tags", {}).get("required"):
+        tags = attr.get("tags", {})
+        if not (tags.get("required") or tags.get("catalog_required")):
             continue
         attr_id = attr.get("id", "")
         has_closed_values = bool(attr.get("values"))

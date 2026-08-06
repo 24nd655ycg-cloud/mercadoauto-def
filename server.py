@@ -180,6 +180,7 @@ class ProductCreate(BaseDoc):
     # "Sensor de Nível"}), preenchidos pela empresa no cadastro — ver
     # GET /products/category-attributes.
     ml_attributes: dict = {}
+    ml_category_id: Optional[str] = None
 
 
 class ProductUpdate(BaseDoc):
@@ -194,6 +195,7 @@ class ProductUpdate(BaseDoc):
     external_image_urls: Optional[List[str]] = None
     video_url: Optional[str] = None
     ml_attributes: Optional[dict] = None
+    ml_category_id: Optional[str] = None
 
 
 class ProductOut(BaseDoc):
@@ -650,6 +652,7 @@ async def create_product(payload: ProductCreate, user_id: str = Depends(get_curr
         "external_image_urls": payload.external_image_urls,
         "video_url": payload.video_url,
         "ml_attributes": payload.ml_attributes or {},
+        "ml_category_id": payload.ml_category_id,
         "status": "draft",
         "ml_id": None,
         "ml_permalink": None,
@@ -681,22 +684,28 @@ async def list_products(
 
 
 @api.get("/products/category-attributes")
-async def category_attributes(title: str, user_id: str = Depends(get_current_user_id)):
+async def category_attributes(title: str, query: str = "", user_id: str = Depends(get_current_user_id)):
     """A partir do título do produto, descobre a categoria real no Mercado
     Livre e devolve os atributos OBRIGATÓRIOS dessa categoria — pra empresa
     preencher no cadastro, em vez do backend tentar adivinhar na hora de
     publicar. Cada categoria pode exigir campos diferentes (ex: FAMILY_NAME,
     BRAND, cor, voltagem...); isso muda dependendo do tipo de peça.
 
+    `query` é opcional — se a categoria detectada a partir do título
+    completo vier errada (títulos de autopeça costumam ser longos e
+    confundir a busca), a empresa pode informar um termo de busca mais
+    curto/direto pra tentar de novo (ex: 'junta cabeçote' em vez do título
+    inteiro com a lista de veículos compatíveis).
+
     IMPORTANTE: essa rota precisa estar declarada ANTES de
     '/products/{product_id}' — senão o FastAPI trata "category-attributes"
     como se fosse um product_id (rotas com parâmetro casam com qualquer
     texto se vierem primeiro na ordem de declaração)."""
-    title = (title or "").strip()
-    if not title:
+    search_text = (query or title or "").strip()
+    if not search_text:
         return {"category_id": None, "category_name": None, "attributes": []}
 
-    category_id = ml_utils.predict_category(title)
+    category_id = ml_utils.predict_category(search_text)
     if not category_id:
         return {"category_id": None, "category_name": None, "attributes": []}
 
@@ -707,7 +716,12 @@ async def category_attributes(title: str, user_id: str = Depends(get_current_use
 
     attributes = []
     for attr in raw_attrs:
-        if not attr.get("tags", {}).get("required"):
+        tags = attr.get("tags", {})
+        # Alguns atributos (como FAMILY_NAME em muitas categorias de
+        # autopeças) vêm marcados como 'catalog_required' em vez de
+        # 'required' — mas o Mercado Livre exige do mesmo jeito na hora de
+        # publicar. Pega os dois tipos, pra não deixar passar nenhum.
+        if not (tags.get("required") or tags.get("catalog_required")):
             continue
         values = attr.get("values") or []
         attributes.append({
@@ -717,7 +731,7 @@ async def category_attributes(title: str, user_id: str = Depends(get_current_use
             "options": [{"id": v.get("id"), "name": v.get("name")} for v in values] if values else None,
         })
 
-    return {"category_id": category_id, "category_name": None, "attributes": attributes}
+    return {"category_id": category_id, "category_name": ml_utils.get_category_name(category_id), "attributes": attributes}
 
 
 @api.get("/products/lookup-sku")
@@ -850,7 +864,7 @@ async def publish_product(product_id: str, user_id: str = Depends(get_current_us
             # "GERAL", "BOMBA OLEO") é texto livre da empresa, não um
             # category_id de verdade do Mercado Livre — por isso a
             # categoria real é descoberta a partir do título do anúncio.
-            category_id = ml_utils.predict_category(title) or "MLB1055"
+            category_id = doc.get("ml_category_id") or ml_utils.predict_category(title) or "MLB1055"
             auto_attributes = ml_utils.build_required_attributes(category_id, title, doc.get("brand", ""))
             # Valores que a própria empresa preencheu no cadastro (reais)
             # têm prioridade sobre o preenchimento automático de reforço —
@@ -944,6 +958,7 @@ def _product_public(doc: dict) -> dict:
         "ml_mock": doc.get("ml_mock", False),
         "error_message": doc.get("error_message"),
         "ml_attributes": doc.get("ml_attributes", {}),
+        "ml_category_id": doc.get("ml_category_id"),
         "created_at": doc.get("created_at", ""),
         "updated_at": doc.get("updated_at", ""),
     }
