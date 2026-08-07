@@ -64,7 +64,7 @@ app = FastAPI(title="MercadoAuto API")
 # Atualizado manualmente a cada mudança relevante — permite confirmar com
 # certeza absoluta se o deploy no ar corresponde ao código mais recente,
 # em vez de depender de testar e "adivinhar" pelo comportamento.
-BACKEND_VERSION = "2026-08-06.1-catalogo-familia"
+BACKEND_VERSION = "2026-08-06.2-family-name-topo"
 api = APIRouter(prefix="/api")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
@@ -917,6 +917,11 @@ async def publish_product(product_id: str, user_id: str = Depends(get_current_us
                     "catalog_listing": True,
                     # O Mercado Livre exige category_id no corpo mesmo
                     "category_id": catalog_match.get("category_id") or ml_utils.predict_category(title) or "MLB1055",
+                    # 'family_name' parece ser exigido como propriedade do
+                    # corpo principal da requisição (não dentro de
+                    # 'attributes') — o erro sempre apontou 'references:
+                    # [body]', não 'body.attributes'.
+                    "family_name": (catalog_match.get("name") or doc.get("brand") or title)[:60],
                     "price": doc["price"],
                     "currency_id": "BRL",
                     "available_quantity": doc["quantity"],
@@ -947,9 +952,14 @@ async def publish_product(product_id: str, user_id: str = Depends(get_current_us
                 if "FAMILY_NAME" not in attrs_by_id:
                     attrs_by_id["FAMILY_NAME"] = {"id": "FAMILY_NAME", "value_name": (doc.get("brand") or title)[:60]}
                 required_attributes = list(attrs_by_id.values())
+                family_name_value = user_attributes.get("FAMILY_NAME") or (doc.get("brand") or title)[:60]
                 item_payload = {
                     "title": title[:60],
                     "category_id": category_id,
+                    # Mesma correção acima: 'family_name' como propriedade
+                    # de nível superior do corpo, não só dentro de
+                    # 'attributes'.
+                    "family_name": family_name_value,
                     "price": doc["price"],
                     "currency_id": "BRL",
                     "available_quantity": doc["quantity"],
