@@ -325,6 +325,30 @@ def fetch_seller_listings(access_token: str, limit: int = 50) -> list[dict]:
     return listings
 
 
+def search_catalog_product(query: str, site_id: str = "MLB", access_token: str | None = None) -> dict | None:
+    """Busca no CATÁLOGO real de produtos do Mercado Livre — equivalente à
+    aba "Por código" do anúncio manual (usa código/MPN pra achar o produto
+    já cadastrado no catálogo deles, com categoria e atributos prontos,
+    incluindo 'família'). Quando existe correspondência, publicar contra
+    esse catalog_product_id evita ter que montar/adivinhar atributos —
+    o Mercado Livre já sabe tudo sobre o produto."""
+    headers = {"Authorization": f"Bearer {access_token}"} if access_token else {}
+    try:
+        resp = requests.get(
+            f"{ML_API_BASE}/products/search",
+            params={"q": query, "site_id": site_id, "status": "active"},
+            headers=headers,
+            timeout=15,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        results = data.get("results") or []
+        return results[0] if results else None
+    except Exception as e:
+        logger.error(f"Busca no catálogo falhou para '{query}': {e}")
+        return None
+
+
 def search_public_listings(query: str, limit: int = 10, site_id: str = "MLB") -> list[dict]:
     """Busca pública no catálogo do Mercado Livre (não exige token de usuário).
     Usada para sugerir título/preço a partir de anúncios reais parecidos."""

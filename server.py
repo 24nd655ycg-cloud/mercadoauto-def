@@ -897,42 +897,62 @@ async def publish_product(product_id: str, user_id: str = Depends(get_current_us
                 detail="Este produto não tem nenhuma imagem cadastrada. O Mercado Livre exige ao menos uma foto para publicar — adicione uma foto antes de tentar de novo.",
             )
         try:
-            # A categoria salva no produto (vinda de planilha/ERP, ex:
-            # "GERAL", "BOMBA OLEO") é texto livre da empresa, não um
-            # category_id de verdade do Mercado Livre — por isso a
-            # categoria real é descoberta a partir do título do anúncio.
-            category_id = doc.get("ml_category_id") or ml_utils.predict_category(title) or "MLB1055"
-            auto_attributes = ml_utils.build_required_attributes(category_id, title, doc.get("brand", ""))
-            # Valores que a própria empresa preencheu no cadastro (reais)
-            # têm prioridade sobre o preenchimento automático de reforço —
-            # substitui qualquer atributo com o mesmo id.
-            user_attributes = doc.get("ml_attributes") or {}
-            attrs_by_id = {a["id"]: a for a in auto_attributes}
-            for attr_id, value in user_attributes.items():
-                if value:
-                    attrs_by_id[attr_id] = {"id": attr_id, "value_name": value}
-            # Rede de segurança incondicional: o Mercado Livre já rejeitou
-            # anúncios reais desta conta por falta de 'FAMILY_NAME', mesmo
-            # quando esse atributo não aparece na lista pública de atributos
-            # da categoria (API de listagem e API de validação divergem
-            # nesse campo, nessa conta). Por isso, garante que ele sempre
-            # vá — não depende de ter sido "descoberto" antes.
-            if "FAMILY_NAME" not in attrs_by_id:
-                attrs_by_id["FAMILY_NAME"] = {"id": "FAMILY_NAME", "value_name": (doc.get("brand") or title)[:60]}
-            required_attributes = list(attrs_by_id.values())
-            item_payload = {
-                "title": title[:60],
-                "category_id": category_id,
-                "price": doc["price"],
-                "currency_id": "BRL",
-                "available_quantity": doc["quantity"],
-                "buying_mode": "buy_it_now",
-                "listing_type_id": "gold_special",
-                "condition": doc.get("condition", "new"),
-                "description": {"plain_text": doc.get("ai_description") or doc.get("description", "")},
-                "pictures": [{"source": u} for u in picture_urls],
-                "attributes": required_attributes,
-            }
+            # PASSO 1: tenta achar o produto no CATÁLOGO real do Mercado
+            # Livre pelo código/SKU — equivalente à aba "Por código" do
+            # anúncio manual deles. Se achar, o Mercado Livre já sabe
+            # categoria e atributos (incluindo 'família'); publicar contra
+            # esse catalog_product_id evita ter que adivinhar qualquer coisa.
+            catalog_match = ml_utils.search_catalog_product(doc.get("sku", ""), access_token=access_token) if doc.get("sku") else None
+            if not catalog_match and doc.get("brand"):
+                catalog_match = ml_utils.search_catalog_product(f"{doc['brand']} {doc.get('sku', '')}".strip(), access_token=access_token)
+
+            if catalog_match:
+                item_payload = {
+                    "catalog_product_id": catalog_match["id"],
+                    "catalog_listing": True,
+                    "price": doc["price"],
+                    "currency_id": "BRL",
+                    "available_quantity": doc["quantity"],
+                    "buying_mode": "buy_it_now",
+                    "listing_type_id": "gold_special",
+                    "condition": doc.get("condition", "new"),
+                    "pictures": [{"source": u} for u in picture_urls],
+                }
+            else:
+                # PASSO 2: não achou no catálogo — monta o anúncio na mão,
+                # com a categoria escolhida (manual ou prevista) e os
+                # atributos preenchidos pela empresa/reforço automático.
+                category_id = doc.get("ml_category_id") or ml_utils.predict_category(title) or "MLB1055"
+                auto_attributes = ml_utils.build_required_attributes(category_id, title, doc.get("brand", ""))
+                # Valores que a própria empresa preencheu no cadastro (reais)
+                # têm prioridade sobre o preenchimento automático de reforço —
+                # substitui qualquer atributo com o mesmo id.
+                user_attributes = doc.get("ml_attributes") or {}
+                attrs_by_id = {a["id"]: a for a in auto_attributes}
+                for attr_id, value in user_attributes.items():
+                    if value:
+                        attrs_by_id[attr_id] = {"id": attr_id, "value_name": value}
+                # Rede de segurança incondicional: o Mercado Livre já rejeitou
+                # anúncios reais desta conta por falta de 'FAMILY_NAME', mesmo
+                # quando esse atributo não aparece na lista pública de atributos
+                # da categoria. Só entra em ação se a empresa não preencheu
+                # nada — o valor real dela (passo acima) sempre tem prioridade.
+                if "FAMILY_NAME" not in attrs_by_id:
+                    attrs_by_id["FAMILY_NAME"] = {"id": "FAMILY_NAME", "value_name": (doc.get("brand") or title)[:60]}
+                required_attributes = list(attrs_by_id.values())
+                item_payload = {
+                    "title": title[:60],
+                    "category_id": category_id,
+                    "price": doc["price"],
+                    "currency_id": "BRL",
+                    "available_quantity": doc["quantity"],
+                    "buying_mode": "buy_it_now",
+                    "listing_type_id": "gold_special",
+                    "condition": doc.get("condition", "new"),
+                    "description": {"plain_text": doc.get("ai_description") or doc.get("description", "")},
+                    "pictures": [{"source": u} for u in picture_urls],
+                    "attributes": required_attributes,
+                }
             # Vídeo é opcional — o Mercado Livre só aceita vídeos hospedados
             # no YouTube, referenciados pelo ID do vídeo. Se o link não for
             # reconhecido como YouTube, simplesmente não anexamos vídeo (não
