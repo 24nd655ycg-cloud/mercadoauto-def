@@ -343,7 +343,15 @@ def search_catalog_product(query: str, site_id: str = "MLB", access_token: str |
         resp.raise_for_status()
         data = resp.json()
         results = data.get("results") or []
-        return results[0] if results else None
+        # O parâmetro 'status=active' da busca não garante, na prática, que
+        # o resultado realmente esteja ativo (já vimos o Mercado Livre
+        # recusar publicação com "not_active" mesmo assim) — confere de
+        # verdade no código e pula qualquer resultado inativo, em vez de
+        # confiar cegamente no primeiro item devolvido.
+        for item in results:
+            if item.get("status") == "active":
+                return item
+        return None
     except Exception as e:
         logger.error(f"Busca no catálogo falhou para '{query}': {e}")
         return None
