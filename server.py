@@ -64,7 +64,7 @@ app = FastAPI(title="MercadoAuto API")
 # Atualizado manualmente a cada mudança relevante — permite confirmar com
 # certeza absoluta se o deploy no ar corresponde ao código mais recente,
 # em vez de depender de testar e "adivinhar" pelo comportamento.
-BACKEND_VERSION = "2026-08-06.3-reverte-title-manual"
+BACKEND_VERSION = "2026-08-06.4-family-name-topo-sem-duplicar"
 api = APIRouter(prefix="/api")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
@@ -944,17 +944,22 @@ async def publish_product(product_id: str, user_id: str = Depends(get_current_us
                 for attr_id, value in user_attributes.items():
                     if value:
                         attrs_by_id[attr_id] = {"id": attr_id, "value_name": value}
-                # Rede de segurança incondicional: o Mercado Livre já rejeitou
-                # anúncios reais desta conta por falta de 'FAMILY_NAME', mesmo
-                # quando esse atributo não aparece na lista pública de atributos
-                # da categoria. Só entra em ação se a empresa não preencheu
-                # nada — o valor real dela (passo acima) sempre tem prioridade.
-                if "FAMILY_NAME" not in attrs_by_id:
-                    attrs_by_id["FAMILY_NAME"] = {"id": "FAMILY_NAME", "value_name": (doc.get("brand") or title)[:60]}
+                # 'family_name' parece ser uma propriedade do CORPO PRINCIPAL
+                # da requisição, não um atributo de categoria — mandar ele
+                # duplicado (nível superior + dentro de 'attributes' ao
+                # mesmo tempo) já causou um erro diferente antes ('title'
+                # inválido). Por isso, tira ele de dentro de 'attributes' e
+                # manda só no nível superior, sempre (nunca deixa de mandar
+                # — o Mercado Livre já rejeitou anúncios reais desta conta
+                # por falta dele, mesmo sem aparecer na lista de atributos
+                # da categoria).
+                family_name_value = user_attributes.get("FAMILY_NAME") or (doc.get("brand") or title)[:60]
+                attrs_by_id.pop("FAMILY_NAME", None)
                 required_attributes = list(attrs_by_id.values())
                 item_payload = {
                     "title": title[:60],
                     "category_id": category_id,
+                    "family_name": family_name_value,
                     "price": doc["price"],
                     "currency_id": "BRL",
                     "available_quantity": doc["quantity"],
