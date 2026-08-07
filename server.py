@@ -910,6 +910,8 @@ async def publish_product(product_id: str, user_id: str = Depends(get_current_us
                 item_payload = {
                     "catalog_product_id": catalog_match["id"],
                     "catalog_listing": True,
+                    # O Mercado Livre exige category_id no corpo mesmo
+                    "category_id": catalog_match.get("category_id") or ml_utils.predict_category(title) or "MLB1055",
                     "price": doc["price"],
                     "currency_id": "BRL",
                     "available_quantity": doc["quantity"],
