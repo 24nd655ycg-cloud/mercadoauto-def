@@ -60,6 +60,11 @@ def _extract_youtube_id(video_url: Optional[str]) -> Optional[str]:
     return m.group(1) if m else None
 
 app = FastAPI(title="MercadoAuto API")
+
+# Atualizado manualmente a cada mudança relevante — permite confirmar com
+# certeza absoluta se o deploy no ar corresponde ao código mais recente,
+# em vez de depender de testar e "adivinhar" pelo comportamento.
+BACKEND_VERSION = "2026-08-06.1-catalogo-familia"
 api = APIRouter(prefix="/api")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
@@ -1481,7 +1486,7 @@ async def stats(user_id: str = Depends(get_current_user_id)):
 
 @api.get("/")
 async def root():
-    return {"service": "MercadoAuto API", "status": "ok"}
+    return {"service": "MercadoAuto API", "status": "ok", "version": BACKEND_VERSION}
 
 
 @api.get("/ai-status")
